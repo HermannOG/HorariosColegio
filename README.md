@@ -108,10 +108,11 @@ src/
     ui.jsx           -> botones, tarjetas, campos de formulario reutilizables
 ```
 
+
 ## Cómo usar la app, paso a paso
 
 1. **Grilla del día:** definí las horas de cada lección, recreo y almuerzo (se aplica de lunes a viernes).
-2. **Materias:** agregá las materias del colegio.
+2. **Materias:** agregá las materias del colegio.  
 3. **Grupos:** elegí un año y cuántas secciones tiene, y se crean de una vez (ej: 9° año con 6 secciones crea 9-1 a 9-6). Esto se puede repetir cada año si cambia la cantidad de grupos.
 4. **Profesores:** agregá cada profesor con sus días libres, bloques preferidos/a evitar, y la lista de grupos+materias que da, con cuántas lecciones por semana necesita cada uno.
 5. **Horario:** hacé clic en "Generar horario". Si alguna lección no se pudo ubicar sin choques, aparece marcada para que la ajustés a mano. Podés ver el resultado por profesor o por grupo.
