@@ -6,6 +6,7 @@ import {
 import { PageHeader, Button, Card, Input, Select, Spinner, EmptyState, Pill } from '../components/ui.jsx'
 
 const DIAS_LABEL = { lunes: 'Lun', martes: 'Mar', miercoles: 'Mié', jueves: 'Jue', viernes: 'Vie' }
+const ANIOS_DISPONIBLES = ['7', '8', '9', '10', '11']
 
 const profesorVacio = () => ({
   nombre: '',
@@ -153,6 +154,10 @@ export default function ProfesoresPage() {
 }
 
 function FormularioProfesor({ form, setForm, grupos, materias, bloquesClase, mallas, profesores, editandoId, onGuardar, onCancelar, guardando, esNuevo }) {
+  // Bloques nuevos que el usuario está armando y todavía no tienen ninguna
+  // sección marcada (por eso no existen aún dentro de form.asignaciones).
+  const [bloquesNuevos, setBloquesNuevos] = useState([])
+
   function toggleDia(dia) {
     setForm(f => ({
       ...f,
@@ -178,53 +183,84 @@ function FormularioProfesor({ form, setForm, grupos, materias, bloquesClase, mal
     return fila ? Number(fila.leccionesPorSemana) : null
   }
 
-  // Cuántas lecciones de esa materia+grupo ya están cubiertas por OTROS profesores
-  // (para detectar huecos o excesos frente a la malla).
-  function leccionesYaCubiertas(grupoId, materiaId, excluirIndiceLocal) {
-    let total = 0
-    profesores.forEach(p => {
-      if (p.id === editandoId) return // este profesor se cuenta aparte, con el form en edición
-      ;(p.asignaciones || []).forEach(a => {
-        if (a.grupoId === grupoId && a.materiaId === materiaId) total += Number(a.leccionesPorSemana) || 0
-      })
-    })
-    form.asignaciones.forEach((a, i) => {
-      if (i === excluirIndiceLocal) return
-      if (a.grupoId === grupoId && a.materiaId === materiaId) total += Number(a.leccionesPorSemana) || 0
-    })
-    return total
+  // Igual que la anterior, pero busca directo por año (sin necesitar que ya
+  // exista un grupo creado de ese año) — útil para mostrar el aviso de
+  // cobertura incluso cuando el año todavía no tiene secciones.
+  function leccionesSegunMallaPorAnio(anio, materiaId) {
+    const filasAnio = mallas[anio] || []
+    const fila = filasAnio.find(f => f.materiaId === materiaId)
+    return fila ? Number(fila.leccionesPorSemana) : null
   }
 
-  function agregarAsignacion() {
+  // Agrupa las asignaciones del profesor en "bloques" visuales: cada bloque
+  // es una combinación única de materia+año, con la lista de secciones
+  // (grupoId) que tiene marcadas dentro de ese año. Por dentro, cada sección
+  // sigue siendo una entrada independiente en form.asignaciones — esto solo
+  // las junta para mostrarlas y editarlas de forma más compacta.
+  function agruparBloques() {
+    const bloques = []
+    const indice = {} // `${materiaId}|${anio}` -> índice en `bloques`
+    form.asignaciones.forEach(a => {
+      const grupo = grupos.find(g => g.id === a.grupoId)
+      if (!grupo) return
+      const clave = `${a.materiaId}|${grupo.anio}`
+      if (!(clave in indice)) {
+        indice[clave] = bloques.length
+        bloques.push({ materiaId: a.materiaId, anio: grupo.anio, gruposIds: [] })
+      }
+      bloques[indice[clave]].gruposIds.push(a.grupoId)
+    })
+    return bloques
+  }
+
+  // Bloques existentes (derivados de form.asignaciones) + bloques nuevos
+  // (todavía sin ninguna sección marcada) que el usuario está armando.
+  const bloquesExistentes = agruparBloques()
+  const todosLosBloques = [...bloquesExistentes, ...bloquesNuevos]
+
+  // Reconstruye form.asignaciones a partir de los bloques (existentes + nuevos),
+  // aplicando las lecciones según la malla de cada año, y actualiza cuáles
+  // bloques siguen "vacíos" (sin secciones) para seguir mostrándolos editables.
+  function aplicarBloques(bloquesActualizados) {
+    const nuevasAsignaciones = []
+    bloquesActualizados.forEach(bloque => {
+      bloque.gruposIds.forEach(grupoId => {
+        const sugeridas = leccionesSegunMalla(grupoId, bloque.materiaId)
+        nuevasAsignaciones.push({ grupoId, materiaId: bloque.materiaId, leccionesPorSemana: sugeridas ?? 0 })
+      })
+    })
+    setBloquesNuevos(bloquesActualizados.filter(b => b.gruposIds.length === 0))
+    setForm(f => ({ ...f, asignaciones: nuevasAsignaciones }))
+  }
+
+  function agregarBloque() {
     if (grupos.length === 0 || materias.length === 0) return
-    const grupoId = grupos[0].id
     const materiaId = materias[0].id
-    const sugeridas = leccionesSegunMalla(grupoId, materiaId)
-    setForm(f => ({
-      ...f,
-      asignaciones: [...f.asignaciones, { grupoId, materiaId, leccionesPorSemana: sugeridas ?? 2 }],
-    }))
+    const anio = grupos[0].anio
+    setBloquesNuevos(prev => [...prev, { materiaId, anio, gruposIds: [] }])
   }
 
-  // Al cambiar grupo o materia de una fila, sugerimos automáticamente las lecciones
-  // de la malla (si existe), pero el usuario puede seguir ajustándolo a mano después.
-  function actualizarAsignacion(index, cambios) {
-    setForm(f => {
-      const asignaciones = f.asignaciones.map((a, i) => {
-        if (i !== index) return a
-        const actualizada = { ...a, ...cambios }
-        if ('grupoId' in cambios || 'materiaId' in cambios) {
-          const sugeridas = leccionesSegunMalla(actualizada.grupoId, actualizada.materiaId)
-          if (sugeridas != null) actualizada.leccionesPorSemana = sugeridas
-        }
-        return actualizada
-      })
-      return { ...f, asignaciones }
+  function actualizarBloque(indexBloque, cambios) {
+    const actualizados = todosLosBloques.map((b, i) => (i === indexBloque ? { ...b, ...cambios } : b))
+    // Si cambia la materia o el año, las secciones marcadas ya no tienen sentido -> se limpian
+    if ('materiaId' in cambios || 'anio' in cambios) {
+      actualizados[indexBloque] = { ...actualizados[indexBloque], gruposIds: [] }
+    }
+    aplicarBloques(actualizados)
+  }
+
+  function toggleSeccionEnBloque(indexBloque, grupoId) {
+    const actualizados = todosLosBloques.map((b, i) => {
+      if (i !== indexBloque) return b
+      const yaEsta = b.gruposIds.includes(grupoId)
+      return { ...b, gruposIds: yaEsta ? b.gruposIds.filter(g => g !== grupoId) : [...b.gruposIds, grupoId] }
     })
+    aplicarBloques(actualizados)
   }
 
-  function quitarAsignacion(index) {
-    setForm(f => ({ ...f, asignaciones: f.asignaciones.filter((_, i) => i !== index) }))
+  function quitarBloque(indexBloque) {
+    const actualizados = todosLosBloques.filter((_, i) => i !== indexBloque)
+    aplicarBloques(actualizados)
   }
 
   return (
@@ -289,51 +325,56 @@ function FormularioProfesor({ form, setForm, grupos, materias, bloquesClase, mal
 
         <div>
           <div className="flex items-center justify-between mb-2">
-            <label className="block text-sm font-medium text-ink-700">Grupos y materias que imparte</label>
-            <button onClick={agregarAsignacion} className="text-sm font-medium text-sage-700 hover:text-sage-800">+ Agregar</button>
+            <label className="block text-sm font-medium text-ink-700">Materias que imparte</label>
+            <button onClick={agregarBloque} className="text-sm font-medium text-sage-700 hover:text-sage-800">+ Agregar materia</button>
           </div>
+          <p className="text-xs text-ink-400 mb-3">
+            Elegí la materia, el año, y qué secciones de ese año le corresponden. Como cada materia de un grupo la da un solo profesor, las lecciones por semana se toman directo de la malla curricular.
+          </p>
 
-          {form.asignaciones.length === 0 ? (
-            <p className="text-sm text-ink-400 italic">Sin asignaciones todavía.</p>
+          {todosLosBloques.length === 0 ? (
+            <p className="text-sm text-ink-400 italic">Sin materias asignadas todavía.</p>
           ) : (
-            <div className="space-y-2">
-              {form.asignaciones.map((a, i) => {
-                const sugeridas = leccionesSegunMalla(a.grupoId, a.materiaId)
-                const cubiertasOtros = leccionesYaCubiertas(a.grupoId, a.materiaId, i)
-                const totalConEsta = cubiertasOtros + (Number(a.leccionesPorSemana) || 0)
-                let aviso = null
-                if (sugeridas != null) {
-                  if (totalConEsta < sugeridas) {
-                    aviso = { tono: 'clay', texto: `Faltan ${sugeridas - totalConEsta} lecc. para completar la malla (pide ${sugeridas}).` }
-                  } else if (totalConEsta > sugeridas) {
-                    aviso = { tono: 'clay', texto: `Hay ${totalConEsta - sugeridas} lecc. de más según la malla (pide ${sugeridas}).` }
-                  } else {
-                    aviso = { tono: 'sage', texto: `Completa la malla (${sugeridas} lecc./sem.).` }
-                  }
-                }
+            <div className="space-y-3">
+              {todosLosBloques.map((bloque, i) => {
+                const seccionesDelAnio = grupos.filter(g => g.anio === bloque.anio).sort((a, b) => Number(a.seccion) - Number(b.seccion))
+                const leccionesPorSemana = leccionesSegunMallaPorAnio(bloque.anio, bloque.materiaId)
+                const enMalla = leccionesPorSemana != null
+
                 return (
-                  <div key={i} className="bg-ink-50 rounded-md p-2.5">
-                    <div className="flex items-center gap-2">
-                      <Select value={a.grupoId} onChange={e => actualizarAsignacion(i, { grupoId: e.target.value })} className="flex-1">
-                        {grupos.map(g => <option key={g.id} value={g.id}>{g.nombre}</option>)}
-                      </Select>
-                      <Select value={a.materiaId} onChange={e => actualizarAsignacion(i, { materiaId: e.target.value })} className="flex-1">
+                  <div key={i} className="bg-ink-50 rounded-md p-3">
+                    <div className="flex items-center gap-2 mb-2.5">
+                      <Select value={bloque.materiaId} onChange={e => actualizarBloque(i, { materiaId: e.target.value })} className="flex-1">
                         {materias.map(m => <option key={m.id} value={m.id}>{m.nombre}</option>)}
                       </Select>
-                      <div className="flex items-center gap-1.5 shrink-0">
-                        <Input
-                          type="number" min="1" max="20"
-                          value={a.leccionesPorSemana}
-                          onChange={e => actualizarAsignacion(i, { leccionesPorSemana: e.target.value })}
-                          className="w-16"
-                        />
-                        <span className="text-xs text-ink-400 whitespace-nowrap">lecc./sem.</span>
-                      </div>
-                      <button onClick={() => quitarAsignacion(i)} className="text-ink-300 hover:text-clay-600 px-1">✕</button>
+                      <Select value={bloque.anio} onChange={e => actualizarBloque(i, { anio: e.target.value })} className="w-28">
+                        {ANIOS_DISPONIBLES.map(a => <option key={a} value={a}>{a}° año</option>)}
+                      </Select>
+                      <button onClick={() => quitarBloque(i)} className="text-ink-300 hover:text-clay-600 px-1 shrink-0">✕</button>
                     </div>
-                    {aviso && (
-                      <p className={`text-xs mt-1.5 ${aviso.tono === 'clay' ? 'text-clay-600' : 'text-sage-600'}`}>{aviso.texto}</p>
+
+                    {seccionesDelAnio.length === 0 ? (
+                      <p className="text-xs text-clay-600">No hay secciones creadas para {bloque.anio}° año todavía.</p>
+                    ) : (
+                      <div className="flex flex-wrap gap-1.5">
+                        {seccionesDelAnio.map(g => (
+                          <Pill
+                            key={g.id}
+                            tone="sage"
+                            active={bloque.gruposIds.includes(g.id)}
+                            onClick={() => toggleSeccionEnBloque(i, g.id)}
+                          >
+                            {g.nombre}
+                          </Pill>
+                        ))}
+                      </div>
                     )}
+
+                    <p className={`text-xs mt-2 ${enMalla ? 'text-sage-600' : 'text-clay-600'}`}>
+                      {enMalla
+                        ? `${leccionesPorSemana} lecc./sem. por sección, según la malla de ${bloque.anio}° año.`
+                        : `Esta materia no está en la malla curricular de ${bloque.anio}° año — agregala en «Malla curricular» primero.`}
+                    </p>
                   </div>
                 )
               })}
