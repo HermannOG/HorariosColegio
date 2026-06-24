@@ -63,7 +63,12 @@ function construirUnidades(profesores) {
       }
 
       if (asig.bloqueContinuo) {
-        unidades.push({ ...base, tipo: 'continua', cantidadBloques: cantidad })
+        unidades.push({
+          ...base,
+          tipo: 'continua',
+          cantidadBloques: cantidad,
+          puedeAtravesarAlmuerzo: !!asig.puedeAtravesarAlmuerzo,
+        })
         continue
       }
 
@@ -80,16 +85,55 @@ function construirUnidades(profesores) {
   return unidades
 }
 
-// Identifica tramos de exactamente `tamano` bloques "clase" consecutivos
-// en la grilla (sin recreo/almuerzo en medio), recorriendo el orden real
-// de la grilla completa. Para tamano=2 da pares, para tamano=1 da bloques
-// sueltos, para tamano=6 da tramos de 6 lecciones seguidas, etc.
-function construirTramosConsecutivos(bloquesTodos, tamano) {
+// Identifica tramos de exactamente `tamano` bloques de tipo 'clase'
+// (lecciones reales) en la grilla.
+//
+// - Si `permitirAtravesarRecreos` es false (caso normal: dobles y sueltas),
+//   el tramo debe ser estrictamente consecutivo, sin nada en medio — el
+//   comportamiento de siempre.
+// - Si es true (caso de "bloque continuo", ej. Tecnología), se permite que
+//   en el camino haya recreos (siempre se atraviesan, nunca cuentan como
+//   interrupción) y, si `puedeAtravesarAlmuerzo` es true, también el bloque
+//   de almuerzo. Cualquier otro corte (almuerzo no permitido) termina el
+//   tramo ahí.
+//
+// Devuelve un array de tramos, cada uno como un array de exactamente
+// `tamano` bloques de tipo 'clase' (los recreos/almuerzo atravesados no se
+// incluyen en el resultado, porque no se "ocupan", solo se permite que
+// estén en medio del tramo).
+function construirTramosConsecutivos(bloquesTodos, tamano, permitirAtravesarRecreos = false, puedeAtravesarAlmuerzo = false) {
+  if (!permitirAtravesarRecreos) {
+    // Comportamiento estricto de siempre: ventana de `tamano` bloques
+    // consecutivos en la grilla, todos de tipo 'clase'.
+    const tramos = []
+    for (let i = 0; i + tamano <= bloquesTodos.length; i++) {
+      const candidato = bloquesTodos.slice(i, i + tamano)
+      if (candidato.every(b => b.tipo === 'clase')) {
+        tramos.push(candidato)
+      }
+    }
+    return tramos
+  }
+
   const tramos = []
-  for (let i = 0; i + tamano <= bloquesTodos.length; i++) {
-    const candidato = bloquesTodos.slice(i, i + tamano)
-    if (candidato.every(b => b.tipo === 'clase')) {
-      tramos.push(candidato)
+  for (let inicio = 0; inicio < bloquesTodos.length; inicio++) {
+    if (bloquesTodos[inicio].tipo !== 'clase') continue
+    const leccionesDelTramo = []
+    for (let i = inicio; i < bloquesTodos.length; i++) {
+      const bloque = bloquesTodos[i]
+      if (bloque.tipo === 'clase') {
+        leccionesDelTramo.push(bloque)
+        if (leccionesDelTramo.length === tamano) break
+      } else if (bloque.tipo === 'recreo') {
+        continue // los recreos siempre se pueden atravesar
+      } else if (bloque.tipo === 'almuerzo' && puedeAtravesarAlmuerzo) {
+        continue // el almuerzo se atraviesa solo si está permitido para esta materia
+      } else {
+        break // corte real: almuerzo no permitido, u otro tipo de bloque
+      }
+    }
+    if (leccionesDelTramo.length === tamano) {
+      tramos.push(leccionesDelTramo)
     }
   }
   return tramos
@@ -103,23 +147,36 @@ function calcularDisponibilidad(unidad, dias, bloquesClase) {
 export function generarHorario({ profesores, dias, bloques, modoReparto = 'parejo' }) {
   const bloquesClase = bloques.filter(b => b.tipo === 'clase')
 
-  // Cache de tramos consecutivos por tamaño, para no recalcularlos por cada unidad.
-  const tramosPorTamano = {}
-  function tramosDeTamano(tamano) {
-    if (!tramosPorTamano[tamano]) {
-      tramosPorTamano[tamano] = construirTramosConsecutivos(bloques, tamano)
+  // Cache de tramos consecutivos por (tamaño, si atraviesa recreos, si
+  // atraviesa almuerzo), para no recalcularlos por cada unidad.
+  const tramosPorClave = {}
+  function tramosDeTamano(tamano, permitirAtravesarRecreos, puedeAtravesarAlmuerzo) {
+    const clave = `${tamano}|${permitirAtravesarRecreos}|${puedeAtravesarAlmuerzo}`
+    if (!tramosPorClave[clave]) {
+      tramosPorClave[clave] = construirTramosConsecutivos(bloques, tamano, permitirAtravesarRecreos, puedeAtravesarAlmuerzo)
     }
-    return tramosPorTamano[tamano]
+    return tramosPorClave[clave]
   }
 
   let unidades = construirUnidades(profesores)
 
-  // Ordenar: las más restringidas primero; entre empates, las unidades más
-  // grandes (continuas y dobles) antes que las sueltas, porque son más
-  // difíciles de encajar y conviene resolverlas cuanto antes.
+  // Ordenar: las unidades 'continua' SIEMPRE van primero, sin excepción.
+  // Necesitan un tramo exacto de N bloques consecutivos en la grilla, que es
+  // una restricción mucho más rígida que "tener huecos sueltos disponibles"
+  // — si se colocan después de materias normales, esas materias normales ya
+  // habrán ocupado huecos sueltos por toda la semana y no va a quedar ningún
+  // tramo largo libre, aunque en teoría sí cupiera todo si se acomodara bien
+  // desde el principio. Por eso reservamos su lugar primero, y el resto de
+  // las materias se acomodan alrededor de lo que ya quedó fijo.
+  // Dentro de cada grupo (continua vs. no-continua), ordenamos por la
+  // disponibilidad real del profesor (menos días libres primero), y dentro
+  // de eso, las unidades más grandes (dobles) antes que las sueltas.
   unidades = unidades
     .map(u => ({ ...u, disponibilidad: calcularDisponibilidad(u, dias, bloquesClase) }))
     .sort((a, b) => {
+      const aEsContinua = a.tipo === 'continua'
+      const bEsContinua = b.tipo === 'continua'
+      if (aEsContinua !== bEsContinua) return aEsContinua ? -1 : 1
       if (a.disponibilidad !== b.disponibilidad) return a.disponibilidad - b.disponibilidad
       return b.cantidadBloques - a.cantidadBloques
     })
@@ -167,7 +224,8 @@ export function generarHorario({ profesores, dias, bloques, modoReparto = 'parej
   // preferencia del profesor y por el modo de reparto.
   function opcionesParaUnidad(unidad) {
     const diasDisponibles = dias.filter(d => !unidad.diasNoTrabaja.includes(d))
-    const tramos = tramosDeTamano(unidad.cantidadBloques)
+    const esContinua = unidad.tipo === 'continua'
+    const tramos = tramosDeTamano(unidad.cantidadBloques, esContinua, esContinua && unidad.puedeAtravesarAlmuerzo)
     const opciones = []
     for (const dia of diasDisponibles) {
       for (const tramo of tramos) {
