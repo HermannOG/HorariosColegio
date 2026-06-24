@@ -67,6 +67,7 @@ export default function HorarioPage() {
             ...asig,
             leccionesPorSemana: Number(filaMalla.leccionesPorSemana) || 0,
             bloqueContinuo: !!filaMalla.bloqueContinuo,
+            puedeAtravesarAlmuerzo: !!filaMalla.puedeAtravesarAlmuerzo,
           }
         })
         .filter(Boolean)
