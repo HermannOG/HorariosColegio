@@ -39,26 +39,37 @@ export default function HorarioPage() {
   }, [])
 
   // Devuelve solo los profesores con asignaciones VÁLIDAS según la malla actual
-  // (la materia debe existir en la malla del año correspondiente al grupo).
+  // (la materia debe existir en la malla del año correspondiente al grupo), y
+  // además RESINCRONIZA leccionesPorSemana y bloqueContinuo tomándolos directo
+  // de la malla vigente — así, si la malla cambió después de guardar al
+  // profesor (más lecciones, o se activó "bloque continuo"), el generador
+  // siempre usa el valor más reciente, sin depender de lo que haya quedado
+  // grabado en la asignación del profesor.
   // También devuelve la lista de asignaciones descartadas, para avisar.
   function filtrarAsignacionesContraMalla(listaProfesores) {
     const descartadas = []
     const profesoresFiltrados = listaProfesores.map(prof => {
-      const asignacionesValidas = (prof.asignaciones || []).filter(asig => {
-        const grupo = grupos.find(g => g.id === asig.grupoId)
-        if (!grupo) return false
-        const filasMalla = mallas[grupo.anio] || []
-        const enMalla = filasMalla.some(f => f.materiaId === asig.materiaId)
-        if (!enMalla) {
-          descartadas.push({
-            profesorNombre: prof.nombre,
-            grupoNombre: grupo.nombre,
-            materiaId: asig.materiaId,
-          })
-          return false
-        }
-        return true
-      })
+      const asignacionesValidas = (prof.asignaciones || [])
+        .map(asig => {
+          const grupo = grupos.find(g => g.id === asig.grupoId)
+          if (!grupo) return null
+          const filasMalla = mallas[grupo.anio] || []
+          const filaMalla = filasMalla.find(f => f.materiaId === asig.materiaId)
+          if (!filaMalla) {
+            descartadas.push({
+              profesorNombre: prof.nombre,
+              grupoNombre: grupo.nombre,
+              materiaId: asig.materiaId,
+            })
+            return null
+          }
+          return {
+            ...asig,
+            leccionesPorSemana: Number(filaMalla.leccionesPorSemana) || 0,
+            bloqueContinuo: !!filaMalla.bloqueContinuo,
+          }
+        })
+        .filter(Boolean)
       return { ...prof, asignaciones: asignacionesValidas }
     })
     return { profesoresFiltrados, descartadas }
