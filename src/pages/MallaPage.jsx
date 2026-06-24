@@ -37,7 +37,7 @@ export default function MallaPage() {
     if (materias.length === 0) return
     const materiaYaUsada = new Set(filas.map(f => f.materiaId))
     const disponible = materias.find(m => !materiaYaUsada.has(m.id)) || materias[0]
-    actualizarFilas([...filas, { id: nuevoId(), materiaId: disponible.id, leccionesPorSemana: 2 }])
+    actualizarFilas([...filas, { id: nuevoId(), materiaId: disponible.id, leccionesPorSemana: 2, bloqueContinuo: false }])
   }
 
   function actualizarFila(id, cambios) {
@@ -86,16 +86,17 @@ export default function MallaPage() {
         </div>
 
         <Card className="overflow-hidden">
-          <div className="grid grid-cols-[1fr_7rem_2.5rem] gap-3 px-4 py-2.5 bg-ink-50 text-xs font-semibold text-ink-500 uppercase tracking-wide">
+          <div className="grid grid-cols-[1fr_6rem_9rem_2.5rem] gap-3 px-4 py-2.5 bg-ink-50 text-xs font-semibold text-ink-500 uppercase tracking-wide">
             <span>Materia</span>
             <span>Lecc./sem.</span>
+            <span>Seguidas el mismo día</span>
             <span></span>
           </div>
           <div className="divide-y divide-ink-100">
             {filas.length === 0 ? (
               <p className="px-4 py-6 text-sm text-ink-400 italic">Sin materias en la malla de {ANIO_LABEL[anioActivo]} todavía.</p>
             ) : filas.map(f => (
-              <div key={f.id} className="grid grid-cols-[1fr_7rem_2.5rem] gap-3 px-4 py-2.5 items-center">
+              <div key={f.id} className="grid grid-cols-[1fr_6rem_9rem_2.5rem] gap-3 px-4 py-2.5 items-center">
                 <Select value={f.materiaId} onChange={e => actualizarFila(f.id, { materiaId: e.target.value })}>
                   {materias.map(m => <option key={m.id} value={m.id}>{m.nombre}</option>)}
                 </Select>
@@ -104,6 +105,18 @@ export default function MallaPage() {
                   value={f.leccionesPorSemana}
                   onChange={e => actualizarFila(f.id, { leccionesPorSemana: e.target.value })}
                 />
+                <button
+                  type="button"
+                  onClick={() => actualizarFila(f.id, { bloqueContinuo: !f.bloqueContinuo })}
+                  className={`px-2.5 py-1.5 rounded-md text-xs font-medium border transition-colors ${
+                    f.bloqueContinuo
+                      ? 'bg-clay-500 text-white border-clay-500'
+                      : 'bg-white text-ink-500 border-ink-200 hover:border-ink-400'
+                  }`}
+                  title="Si está activo, todas las lecciones de la semana se dan seguidas, el mismo día"
+                >
+                  {f.bloqueContinuo ? 'Sí, todas juntas' : 'No, se reparten'}
+                </button>
                 <button onClick={() => quitarFila(f.id)} className="text-ink-300 hover:text-clay-600">✕</button>
               </div>
             ))}
