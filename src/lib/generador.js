@@ -287,10 +287,138 @@ export function generarHorario({ profesores, dias, bloques, modoReparto = 'parej
     }
   }
 
+  // ----------------------------------------------------------------------
+  // FASE 2 — Compactar huecos: cada grupo, cada día, debe tener sus
+  // lecciones ocupando un tramo ininterrumpido desde el primer bloque de
+  // clase del día (puede terminar antes, pero nunca con un hueco en medio).
+  // El generador de arriba no garantiza esto por sí solo, porque distintas
+  // materias se van colocando una por una sin coordinarse entre sí. Acá
+  // reparamos cualquier hueco que haya quedado, moviendo lecciones hacia
+  // atrás. Un movimiento solo es válido si el profesor de esa lección
+  // sigue libre en el nuevo horario (no puede chocar con otra clase que
+  // ya tenga en otro grupo a esa hora). Si mover una lección directamente
+  // no es posible, se intenta encadenar con otras lecciones del mismo
+  // grupo+día que sí puedan moverse, antes de rendirse y dejar el hueco
+  // (que se reporta como advertencia).
+  const huecosNoReparables = compactarHuecos({
+    bloquesClase, dias, grupos: [...new Set(unidades.map(u => u.grupoId))],
+    asignaciones, ocupacionProfesor, ocupacionGrupo,
+  })
+  for (const h of huecosNoReparables) {
+    conflictos.push({
+      profesorId: null,
+      profesorNombre: null,
+      grupoId: h.grupoId,
+      materiaId: null,
+      motivo: `quedó un hueco sin clase el día ${h.dia} (lección ${h.bloqueNumero || h.bloqueId}) que no se pudo cerrar sin generar un choque de profesor.`,
+    })
+  }
+
   return {
     asignaciones,
     conflictos,
     generadoEn: new Date().toISOString(),
     completo: conflictos.length === 0,
   }
+}
+
+// Recorre cada grupo y cada día, y busca un REORDENAMIENTO válido de las
+// lecciones de ese día (mismo conjunto de materias/profesores, solo cambia
+// EN QUÉ BLOQUE cae cada una) tal que no quede ningún hueco en medio —
+// es decir, que ocupen exactamente los primeros N bloques de clase del día.
+// Usa backtracking: para cada bloque de clase del día (en orden), prueba
+// asignarle alguna de las lecciones pendientes cuyo profesor esté libre en
+// ese bloque (considerando lo que el profesor tiene en TODOS los demás
+// grupos ese mismo día, no solo este grupo). Si en algún punto ninguna
+// lección pendiente cabe, retrocede y prueba otro orden.
+// Modifica `asignaciones` y las tablas de ocupación in-place cuando
+// encuentra una solución. Si no encuentra ninguna, deja ese día como
+// estaba y lo reporta como hueco no reparable.
+function compactarHuecos({ bloquesClase, dias, grupos, asignaciones, ocupacionProfesor, ocupacionGrupo }) {
+  function kProf(profId, dia, bloqueId) { return `${profId}|${dia}|${bloqueId}` }
+  function kGrupo(grupoId, dia, bloqueId) { return `${grupoId}|${dia}|${bloqueId}` }
+
+  const huecosNoReparables = []
+
+  for (const grupoId of grupos) {
+    for (const dia of dias) {
+      const asignacionesDelDia = asignaciones.filter(a => a.grupoId === grupoId && a.dia === dia)
+      if (asignacionesDelDia.length === 0) continue
+
+      const cantidad = asignacionesDelDia.length
+      const bloquesObjetivo = bloquesClase.slice(0, cantidad) // los primeros N bloques, sin huecos
+
+      // ¿Ya está compacto? (todas las asignaciones ya caen exactamente en
+      // los primeros N bloques de clase del día) -> nada que hacer.
+      const idsObjetivo = new Set(bloquesObjetivo.map(b => b.id))
+      const yaCompacto = asignacionesDelDia.every(a => idsObjetivo.has(a.bloqueId))
+      if (yaCompacto) continue
+
+      // Antes de mover nada, liberamos temporalmente la ocupación de estas
+      // lecciones (de profesor y de grupo) para poder probar combinaciones
+      // sin que choquen contra sí mismas.
+      for (const a of asignacionesDelDia) {
+        delete ocupacionProfesor[kProf(a.profesorId, dia, a.bloqueId)]
+        delete ocupacionGrupo[kGrupo(a.grupoId, dia, a.bloqueId)]
+      }
+
+      const pendientes = [...asignacionesDelDia]
+      const asignacionPorBloque = new Array(bloquesObjetivo.length).fill(null)
+
+      function backtrack(indexBloque) {
+        if (indexBloque === bloquesObjetivo.length) return true
+        const bloque = bloquesObjetivo[indexBloque]
+        for (let i = 0; i < pendientes.length; i++) {
+          const candidata = pendientes[i]
+          if (!candidata) continue
+          const kProfDestino = kProf(candidata.profesorId, dia, bloque.id)
+          if (ocupacionProfesor[kProfDestino]) continue // el profesor ya tiene algo ahí en OTRO grupo
+
+          asignacionPorBloque[indexBloque] = candidata
+          pendientes[i] = null
+          ocupacionProfesor[kProfDestino] = true // marcar temporalmente para las siguientes pruebas
+
+          if (backtrack(indexBloque + 1)) return true
+
+          // deshacer y probar la siguiente candidata
+          delete ocupacionProfesor[kProfDestino]
+          pendientes[i] = candidata
+          asignacionPorBloque[indexBloque] = null
+        }
+        return false
+      }
+
+      const exito = backtrack(0)
+
+      if (exito) {
+        // Aplicar el nuevo orden: actualizar bloqueId de cada asignación y
+        // dejar las tablas de ocupación consistentes (ocupacionProfesor ya
+        // quedó marcada por el backtracking; falta ocupacionGrupo).
+        for (let i = 0; i < bloquesObjetivo.length; i++) {
+          const asig = asignacionPorBloque[i]
+          asig.bloqueId = bloquesObjetivo[i].id
+          ocupacionGrupo[kGrupo(grupoId, dia, bloquesObjetivo[i].id)] = true
+        }
+      } else {
+        // No se encontró ningún reordenamiento sin choques: restauramos las
+        // posiciones originales y dejamos las tablas de ocupación como antes.
+        for (const a of asignacionesDelDia) {
+          ocupacionProfesor[kProf(a.profesorId, dia, a.bloqueId)] = true
+          ocupacionGrupo[kGrupo(a.grupoId, dia, a.bloqueId)] = true
+        }
+        // Reportar el primer hueco real que haya quedado en este día.
+        const ocupados = new Set(asignacionesDelDia.map(a => a.bloqueId))
+        for (let i = 0; i < bloquesClase.length; i++) {
+          if (ocupados.has(bloquesClase[i].id)) continue
+          const hayClaseDespues = bloquesClase.slice(i + 1).some(b => ocupados.has(b.id))
+          if (hayClaseDespues) {
+            huecosNoReparables.push({ grupoId, dia, bloqueId: bloquesClase[i].id, bloqueNumero: bloquesClase[i].numero })
+            break
+          }
+        }
+      }
+    }
+  }
+
+  return huecosNoReparables
 }
