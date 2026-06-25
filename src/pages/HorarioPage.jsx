@@ -244,11 +244,13 @@ function ResumenGeneracion({ horario, mapaProfesores, mapaGrupos, mapaMaterias }
     <div className={`mb-6 px-4 py-3 rounded-md border text-sm ${hayConflictos ? 'bg-clay-50 border-clay-200 text-clay-800' : 'bg-sage-50 border-sage-200 text-sage-800'}`}>
       {hayConflictos ? (
         <div>
-          <p className="font-medium mb-2">{horario.conflictos.length} lección(es) no se pudieron ubicar sin choques:</p>
+          <p className="font-medium mb-2">{horario.conflictos.length} problema(s) encontrados al generar:</p>
           <ul className="space-y-1 text-clay-700">
             {horario.conflictos.map((c, i) => (
               <li key={i}>
-                · {mapaProfesores[c.profesorId] || '—'} — {mapaMaterias[c.materiaId] || '—'} con {mapaGrupos[c.grupoId] || '—'}
+                {c.profesorId
+                  ? `· ${mapaProfesores[c.profesorId] || '—'} — ${mapaMaterias[c.materiaId] || '—'} con ${mapaGrupos[c.grupoId] || '—'}`
+                  : `· ${mapaGrupos[c.grupoId] || c.grupoId} — ${c.motivo}`}
               </li>
             ))}
           </ul>
