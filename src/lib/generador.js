@@ -42,6 +42,14 @@
 //    sigue con las demás, sin trabar el resto del horario. Una unidad
 //    'continua' que no encuentra ningún día con suficientes bloques
 //    seguidos libres se reporta completa como conflicto (no se parte).
+// 6. REGLA DURA — "nunca se sale antes del almuerzo": cada grupo, cada
+//    día, debe tener clase ocupada al menos hasta el último bloque antes
+//    del almuerzo (no puede "terminar" su jornada más temprano que eso).
+//    No es obligatorio CRUZAR el almuerzo, solo llegar hasta el bloque
+//    justo anterior. Esto se aplica en la fase de compactación (ver
+//    `compactarHuecos`): el tramo objetivo de cada grupo+día nunca es
+//    más corto que ese mínimo, aunque eso signifique reportar un hueco
+//    sin reparar si no hay suficientes lecciones ese día para llenarlo.
 // ========================================================================
 
 function construirUnidades(profesores) {
@@ -139,6 +147,22 @@ export function construirTramosConsecutivos(bloquesTodos, tamano, permitirAtrave
   return tramos
 }
 
+// Encuentra, dentro de la grilla completa de bloques (clase/recreo/
+// almuerzo, en orden), el índice del ÚLTIMO bloque de tipo 'clase' que
+// queda ANTES del primer bloque de tipo 'almuerzo'. Ese bloque es el
+// "mínimo de salida": ningún grupo puede terminar su jornada de un día
+// antes de llegar ahí (no es obligatorio cruzar el almuerzo, pero sí
+// llegar justo hasta el límite anterior). Si no hay almuerzo definido en
+// la grilla, no hay mínimo que aplicar (devuelve -1, "sin restricción").
+function indiceUltimoBloqueClaseAntesDelAlmuerzo(bloquesTodos) {
+  const indiceAlmuerzo = bloquesTodos.findIndex(b => b.tipo === 'almuerzo')
+  if (indiceAlmuerzo === -1) return -1
+  for (let i = indiceAlmuerzo - 1; i >= 0; i--) {
+    if (bloquesTodos[i].tipo === 'clase') return i
+  }
+  return -1
+}
+
 function calcularDisponibilidad(unidad, dias, bloquesClase) {
   const diasDisponibles = dias.filter(d => !unidad.diasNoTrabaja.includes(d))
   return diasDisponibles.length * bloquesClase.length
@@ -146,6 +170,16 @@ function calcularDisponibilidad(unidad, dias, bloquesClase) {
 
 function generarUnIntento({ profesores, dias, bloques, modoReparto, azar }) {
   const bloquesClase = bloques.filter(b => b.tipo === 'clase')
+
+  // Posición (dentro de bloquesClase, no de bloques) del último bloque de
+  // clase antes del almuerzo — el mínimo de lecciones que cada grupo debe
+  // tener ese día para no "salir antes del almuerzo". Por ejemplo, si el
+  // almuerzo viene después del bloque 6° (índice 5 en bloquesClase, 0-based),
+  // el mínimo de lecciones por día por grupo es 6.
+  const indiceMinimoEnGrilla = indiceUltimoBloqueClaseAntesDelAlmuerzo(bloques)
+  const minimoLeccionesPorDia = indiceMinimoEnGrilla === -1
+    ? 0
+    : bloquesClase.findIndex(b => b.id === bloques[indiceMinimoEnGrilla].id) + 1
 
   // Cache de tramos consecutivos por (tamaño, si atraviesa recreos, si
   // atraviesa almuerzo), para no recalcularlos por cada unidad.
@@ -187,6 +221,52 @@ function generarUnIntento({ profesores, dias, bloques, modoReparto, azar }) {
   const asignaciones = []
   const conflictos = []
 
+  // ----------------------------------------------------------------------
+  // Para que el modo 'temprano' pueda concentrar carga sin terminar
+  // dejando algún día por debajo de `minimoLeccionesPorDia`, hay que saber,
+  // en todo momento, cuántas lecciones le quedan por colocar a cada grupo
+  // en TOTAL (sumando todos los días). Si un grupo ya tiene poco margen
+  // restante, no se le puede permitir seguir "apilando" lecciones en los
+  // días que ya superaron el mínimo, porque eso le quitaría a los días que
+  // todavía no llegan la posibilidad de alcanzarlo.
+  //
+  // `leccionesPendientesPorGrupo` arranca en el total de lecciones de cada
+  // grupo (suma de leccionesPorSemana de todas sus asignaciones) y baja a
+  // medida que se van colocando unidades.
+  const leccionesPendientesPorGrupo = {}
+  if (minimoLeccionesPorDia > 0) {
+    for (const prof of profesores) {
+      for (const asig of (prof.asignaciones || [])) {
+        const cantidad = Number(asig.leccionesPorSemana) || 0
+        leccionesPendientesPorGrupo[asig.grupoId] = (leccionesPendientesPorGrupo[asig.grupoId] || 0) + cantidad
+      }
+    }
+  }
+
+  // ¿Es seguro agregar `cantidadAOcupar` lecciones más al día `dia` del
+  // grupo `grupoId`, sin arriesgar que algún OTRO día se quede sin
+  // alcanzar el mínimo por falta de lecciones disponibles? Solo se aplica
+  // cuando el día en cuestión YA alcanzó el mínimo (si todavía no lo
+  // alcanzó, siempre es seguro seguir completándolo).
+  function esSeguroConcentrarEnEsteDia(grupoId, dia, cantidadAOcupar) {
+    if (minimoLeccionesPorDia <= 0) return true
+    const cargaActual = leccionesPorDiaGrupo[kCargaDia(grupoId, dia)] || 0
+    if (cargaActual < minimoLeccionesPorDia) return true // este día aún no llegó al mínimo, no hay riesgo
+
+    const pendientesAntes = leccionesPendientesPorGrupo[grupoId] || 0
+    const pendientesDespues = pendientesAntes - cantidadAOcupar
+    // Cuántas lecciones harían falta, como mínimo, para que TODOS los días
+    // que aún no llegaron al mínimo (sin contar el día actual, que ya lo
+    // superó) lo alcancen.
+    let necesarioParaElResto = 0
+    for (const d of dias) {
+      if (d === dia) continue
+      const carga = leccionesPorDiaGrupo[kCargaDia(grupoId, d)] || 0
+      if (carga < minimoLeccionesPorDia) necesarioParaElResto += (minimoLeccionesPorDia - carga)
+    }
+    return pendientesDespues >= necesarioParaElResto
+  }
+
   function kProf(profId, dia, bloqueId) { return `${profId}|${dia}|${bloqueId}` }
   function kGrupo(grupoId, dia, bloqueId) { return `${grupoId}|${dia}|${bloqueId}` }
   function kMatDia(grupoId, materiaId, dia) { return `${grupoId}|${materiaId}|${dia}` }
@@ -210,6 +290,9 @@ function generarUnIntento({ profesores, dias, bloques, modoReparto, azar }) {
     materiaGrupoDia[kMatDia(unidad.grupoId, unidad.materiaId, dia)] = true
     const k = kCargaDia(unidad.grupoId, dia)
     leccionesPorDiaGrupo[k] = (leccionesPorDiaGrupo[k] || 0) + bloquesAOcupar.length
+    if (minimoLeccionesPorDia > 0 && unidad.grupoId in leccionesPendientesPorGrupo) {
+      leccionesPendientesPorGrupo[unidad.grupoId] -= bloquesAOcupar.length
+    }
   }
 
   function puntajeBloque(unidad, bloque) {
@@ -222,6 +305,14 @@ function generarUnIntento({ profesores, dias, bloques, modoReparto, azar }) {
   // Genera las opciones (día, tramo de bloques) para una unidad, del
   // tamaño que sea (1 = suelta, 2 = doble, N = continua), ordenadas por
   // preferencia del profesor y por el modo de reparto.
+  //
+  // El modo 'temprano' concentra carga en los días que YA tienen más
+  // lecciones puestas, para que otros días salgan más temprano — pero
+  // nunca a costa de dejar un día por debajo de `minimoLeccionesPorDia`
+  // (la regla dura de "nunca se sale antes del almuerzo" se resuelve de
+  // forma definitiva en la fase de compactación; acá solo evitamos que
+  // el desempate por puntaje empuje activamente en la dirección
+  // contraria a esa regla).
   function opcionesParaUnidad(unidad) {
     const diasDisponibles = dias.filter(d => !unidad.diasNoTrabaja.includes(d))
     const esContinua = unidad.tipo === 'continua'
@@ -234,7 +325,16 @@ function generarUnIntento({ profesores, dias, bloques, modoReparto, azar }) {
         if (modoReparto === 'parejo') {
           puntaje -= carga // preferir días con MENOS carga acumulada -> reparte parejo
         } else if (modoReparto === 'temprano') {
-          puntaje += carga // preferir días con MÁS carga acumulada -> concentra, deja otros días libres
+          // Preferir días con MÁS carga acumulada (concentra), pero solo
+          // mientras ese día ya vaya camino a alcanzar el mínimo exigido.
+          // Si un día todavía no llega al mínimo, no tiene sentido
+          // "premiarlo" más que a otro: hay que seguir completándolo
+          // igual que en modo parejo, para no terminar saliendo temprano.
+          if (minimoLeccionesPorDia > 0 && carga < minimoLeccionesPorDia) {
+            puntaje -= carga // mismo criterio que 'parejo' hasta llegar al mínimo
+          } else {
+            puntaje += carga // ya alcanzó el mínimo: ahora sí se puede concentrar
+          }
         }
         opciones.push({ dia, bloques: tramo, puntaje, _azar: azar() })
       }
@@ -243,24 +343,37 @@ function generarUnIntento({ profesores, dias, bloques, modoReparto, azar }) {
     return opciones
   }
 
-  function cabeSinChoque(unidad, dia, bloquesAOcupar, permitirRepetirMateriaDia) {
+  function cabeSinChoque(unidad, dia, bloquesAOcupar, permitirRepetirMateriaDia, respetarTopeConcentracion) {
     for (const bloque of bloquesAOcupar) {
       if (ocupacionProfesor[kProf(unidad.profesorId, dia, bloque.id)]) return false
       if (ocupacionGrupo[kGrupo(unidad.grupoId, dia, bloque.id)]) return false
     }
     if (!permitirRepetirMateriaDia && materiaGrupoDia[kMatDia(unidad.grupoId, unidad.materiaId, dia)]) return false
+    if (respetarTopeConcentracion && !esSeguroConcentrarEnEsteDia(unidad.grupoId, dia, bloquesAOcupar.length)) return false
     return true
   }
 
   function intentarUnidad(unidad) {
     const opciones = opcionesParaUnidad(unidad)
 
-    // Primera pasada: sin permitir que la materia se repita el mismo día
-    // (salvo que sea la propia unidad, que ocupa varios bloques del mismo
-    // día a la vez — eso es válido porque es UNA sola unidad).
-    for (const permitirRepetir of [false, true]) {
+    // Tres pasadas, de más estricta a más permisiva — nunca se reporta un
+    // conflicto si existe CUALQUIER lugar donde la unidad físicamente
+    // cabe sin choque de profesor/grupo:
+    //   1) sin repetir materia el mismo día + respetando el tope de
+    //      concentración (no le "robar" margen a otro día para llegar al
+    //      mínimo de salida antes del almuerzo) — el caso ideal.
+    //   2) permitiendo repetir materia el mismo día (igual que antes),
+    //      pero todavía respetando el tope de concentración.
+    //   3) sin respetar el tope de concentración — última instancia, solo
+    //      si las dos anteriores no encontraron ningún lugar. Esto evita
+    //      que la nueva regla genere conflictos artificiales: prioriza el
+    //      reparto seguro, pero nunca bloquea una colocación que de otro
+    //      modo sería válida. Si esto ocurre, puede que algún día quede
+    //      corto de margen — eso se detecta y reporta en la fase de
+    //      compactación (salidaTemprana), no se pierde de vista.
+    for (const [permitirRepetir, respetarTope] of [[false, true], [true, true], [true, false]]) {
       for (const { dia, bloques: bloquesOpcion } of opciones) {
-        if (cabeSinChoque(unidad, dia, bloquesOpcion, permitirRepetir)) {
+        if (cabeSinChoque(unidad, dia, bloquesOpcion, permitirRepetir, respetarTope)) {
           colocar(unidad, dia, bloquesOpcion)
           return true
         }
@@ -290,27 +403,36 @@ function generarUnIntento({ profesores, dias, bloques, modoReparto, azar }) {
   // ----------------------------------------------------------------------
   // FASE 2 — Compactar huecos: cada grupo, cada día, debe tener sus
   // lecciones ocupando un tramo ininterrumpido desde el primer bloque de
-  // clase del día (puede terminar antes, pero nunca con un hueco en medio).
-  // El generador de arriba no garantiza esto por sí solo, porque distintas
-  // materias se van colocando una por una sin coordinarse entre sí. Acá
-  // reparamos cualquier hueco que haya quedado, moviendo lecciones hacia
-  // atrás. Un movimiento solo es válido si el profesor de esa lección
-  // sigue libre en el nuevo horario (no puede chocar con otra clase que
-  // ya tenga en otro grupo a esa hora). Si mover una lección directamente
-  // no es posible, se intenta encadenar con otras lecciones del mismo
-  // grupo+día que sí puedan moverse, antes de rendirse y dejar el hueco
-  // (que se reporta como advertencia).
+  // clase del día (puede terminar antes, pero nunca con un hueco en medio),
+  // Y ADEMÁS ese tramo nunca puede ser más corto que `minimoLeccionesPorDia`
+  // (regla dura: "nunca se sale antes del almuerzo" — el día siempre debe
+  // llegar, como mínimo, hasta el último bloque de clase anterior al
+  // almuerzo). El generador de arriba no garantiza ninguna de las dos cosas
+  // por sí solo, porque distintas materias se van colocando una por una sin
+  // coordinarse entre sí. Acá reparamos cualquier hueco que haya quedado,
+  // moviendo lecciones hacia atrás. Un movimiento solo es válido si el
+  // profesor de esa lección sigue libre en el nuevo horario (no puede
+  // chocar con otra clase que ya tenga en otro grupo a esa hora). Si mover
+  // una lección directamente no es posible, se intenta encadenar con otras
+  // lecciones del mismo grupo+día que sí puedan moverse, antes de rendirse
+  // y dejar el hueco (que se reporta como advertencia). Si el grupo
+  // simplemente no tiene suficientes lecciones ese día para alcanzar el
+  // mínimo exigido, el hueco al final del día tampoco se puede cerrar —
+  // se reporta como conflicto explicado en vez de dejarlo pasar en silencio.
   const huecosNoReparables = compactarHuecos({
     bloques, bloquesClase, dias, grupos: [...new Set(unidades.map(u => u.grupoId))],
-    asignaciones, ocupacionProfesor, ocupacionGrupo,
+    asignaciones, ocupacionProfesor, ocupacionGrupo, minimoLeccionesPorDia,
   })
   for (const h of huecosNoReparables) {
+    const motivo = h.tipo === 'salidaTemprana'
+      ? `el día ${h.dia} este grupo solo tiene ${h.leccionesReales} lección(es) y no llega hasta el bloque previo al almuerzo (mínimo ${h.minimoExigido}) — saldría antes de tiempo.`
+      : `quedó un hueco sin clase el día ${h.dia} (lección ${h.bloqueNumero || h.bloqueId}) que no se pudo cerrar sin generar un choque de profesor.`
     conflictos.push({
       profesorId: null,
       profesorNombre: null,
       grupoId: h.grupoId,
       materiaId: null,
-      motivo: `quedó un hueco sin clase el día ${h.dia} (lección ${h.bloqueNumero || h.bloqueId}) que no se pudo cerrar sin generar un choque de profesor.`,
+      motivo,
     })
   }
 
@@ -358,8 +480,9 @@ export function generarHorario({ profesores, dias, bloques, modoReparto = 'parej
     const resultado = generarUnIntento({ profesores, dias, bloques, modoReparto, azar })
 
     // Puntaje del intento: cada conflicto "normal" (lección sin ubicar)
-    // pesa 1, pero un hueco de grupo sin reparar pesa más, porque rompe
-    // una regla estructural más visible/grave que una lección puntual.
+    // pesa 1, pero un hueco de grupo sin reparar (incluida una salida
+    // temprana antes del almuerzo) pesa más, porque rompe una regla
+    // estructural más visible/grave que una lección puntual.
     const huecos = resultado.conflictos.filter(c => !c.profesorId).length
     const otros = resultado.conflictos.length - huecos
     const puntaje = huecos * 3 + otros
@@ -378,7 +501,9 @@ export function generarHorario({ profesores, dias, bloques, modoReparto = 'parej
 // Recorre cada grupo y cada día, y busca un REORDENAMIENTO válido de las
 // lecciones de ese día tal que no quede ningún hueco en medio — ocupando
 // exactamente los primeros N bloques de clase del día, EN UN ORDEN QUE
-// SOLO USE POSICIONES REALMENTE VÁLIDAS PARA CADA UNIDAD.
+// SOLO USE POSICIONES REALMENTE VÁLIDAS PARA CADA UNIDAD, Y CON N NUNCA
+// MENOR QUE `minimoLeccionesPorDia` (mínimo para no salir antes del
+// almuerzo).
 //
 // Esto es clave: una unidad doble normal (ej. Educación Física, 2
 // lecciones) solo puede ocupar 2 bloques de clase que sean estrictamente
@@ -394,8 +519,12 @@ export function generarHorario({ profesores, dias, bloques, modoReparto = 'parej
 // tipo original). Después, mediante backtracking, se prueba ubicar cada
 // unidad pendiente en alguno de los TRAMOS VÁLIDOS de la grilla (no
 // cualquier rango de índices), de forma que el conjunto ocupe exactamente
-// los primeros N bloques de clase del día sin huecos.
-function compactarHuecos({ bloques, bloquesClase, dias, grupos, asignaciones, ocupacionProfesor, ocupacionGrupo }) {
+// los primeros N bloques de clase del día sin huecos, donde N es el MAYOR
+// entre la cantidad real de lecciones del día y el mínimo exigido — si el
+// grupo no tiene suficientes lecciones para llegar al mínimo, el "hueco"
+// que queda entre la última lección real y el mínimo se reporta como
+// salida temprana, no se inventa una clase para llenarlo.
+function compactarHuecos({ bloques, bloquesClase, dias, grupos, asignaciones, ocupacionProfesor, ocupacionGrupo, minimoLeccionesPorDia = 0 }) {
   function kProf(profId, dia, bloqueId) { return `${profId}|${dia}|${bloqueId}` }
   function kGrupo(grupoId, dia, bloqueId) { return `${grupoId}|${dia}|${bloqueId}` }
 
@@ -454,22 +583,37 @@ function compactarHuecos({ bloques, bloquesClase, dias, grupos, asignaciones, oc
       const asignacionesDelDia = asignaciones.filter(a => a.grupoId === grupoId && a.dia === dia)
       if (asignacionesDelDia.length === 0) continue
 
-      const cantidad = asignacionesDelDia.length
-      const bloquesObjetivo = bloquesClase.slice(0, cantidad) // los primeros N bloques de clase, sin huecos
+      const cantidadReal = asignacionesDelDia.length
+      // El tramo objetivo nunca es más corto que el mínimo exigido (no se
+      // sale antes del almuerzo), aunque eso signifique que, si la cantidad
+      // real de lecciones es menor, quede un hueco al final que no se va a
+      // poder cerrar con clases reales — eso se detecta más abajo y se
+      // reporta como salida temprana, en vez de comprimirse en silencio.
+      const cantidadObjetivo = Math.max(cantidadReal, minimoLeccionesPorDia)
+      const bloquesObjetivo = bloquesClase.slice(0, cantidadObjetivo)
 
       const idsObjetivo = new Set(bloquesObjetivo.map(b => b.id))
-      const yaCompacto = asignacionesDelDia.every(a => idsObjetivo.has(a.bloqueId))
+      const yaCompacto = cantidadReal === cantidadObjetivo && asignacionesDelDia.every(a => idsObjetivo.has(a.bloqueId))
       if (yaCompacto) continue
 
       const unidadesMoviles = agruparEnUnidadesMoviles(asignacionesDelDia)
 
-      // Para cada unidad, precalculamos los tramos válidos (según su tipo)
-      // que caen DENTRO de los bloquesObjetivo (los primeros N del día) —
-      // porque solo nos interesa compactar dentro de ese rango.
-      const idsObjetivoOrdenados = bloquesObjetivo.map(b => b.id)
+      // Cuántas posiciones del objetivo realmente se pueden llenar: si la
+      // cantidad de lecciones reales (cantidadReal) es menor que el
+      // objetivo, las últimas posiciones (cantidadObjetivo - cantidadReal)
+      // jamás se van a poder cubrir con las unidades disponibles — no hay
+      // más clases que mover. Eso no es un fallo del backtracking: es una
+      // salida temprana real. En ese caso, el objetivo CONTRA EL QUE
+      // efectivamente compactamos pasa a ser solo `cantidadReal` (sin
+      // hueco en medio de lo que sí hay), y la salida temprana se reporta
+      // aparte, siempre.
+      const hayFaltante = cantidadObjetivo > cantidadReal
+      const objetivoEfectivo = hayFaltante ? bloquesClase.slice(0, cantidadReal) : bloquesObjetivo
+      const idsObjetivoEfectivo = objetivoEfectivo.map(b => b.id)
+
       function tramosDentroDelObjetivo(unidad) {
         const todos = tramosValidosPara(unidad.tamano, unidad.esContinua, unidad.puedeAtravesarAlmuerzo)
-        return todos.filter(tramo => tramo.every(b => idsObjetivoOrdenados.includes(b.id)))
+        return todos.filter(tramo => tramo.every(b => idsObjetivoEfectivo.includes(b.id)))
       }
 
       // Liberamos temporalmente la ocupación de este grupo+día.
@@ -479,15 +623,15 @@ function compactarHuecos({ bloques, bloquesClase, dias, grupos, asignaciones, oc
       }
 
       const pendientes = [...unidadesMoviles]
-      // ocupacionPorBloqueObjetivo: bloqueId -> true si ya fue asignado en este intento
-      const asignacionTramo = {} // bloqueId -> { unidad, bloquesDestino } (solo en el bloque inicial del tramo)
+      // asignacionTramo: bloqueId (del primer bloque del tramo) -> { unidad, bloquesDestino }
+      const asignacionTramo = {}
       const ocupadoLocal = new Set()
 
       function backtrack() {
-        // Buscar la primera posición (en orden de bloquesObjetivo) que
+        // Buscar la primera posición (en orden del objetivo efectivo) que
         // todavía no esté ocupada en este intento.
-        const primerLibre = bloquesObjetivo.find(b => !ocupadoLocal.has(b.id))
-        if (!primerLibre) return true // todo el objetivo quedó cubierto, éxito
+        const primerLibre = objetivoEfectivo.find(b => !ocupadoLocal.has(b.id))
+        if (!primerLibre) return true // todo el objetivo efectivo quedó cubierto, éxito
 
         for (let i = 0; i < pendientes.length; i++) {
           const unidad = pendientes[i]
@@ -542,10 +686,25 @@ function compactarHuecos({ bloques, bloquesClase, dias, grupos, asignaciones, oc
           if (ocupados.has(bloquesClase[i].id)) continue
           const hayClaseDespues = bloquesClase.slice(i + 1).some(b => ocupados.has(b.id))
           if (hayClaseDespues) {
-            huecosNoReparables.push({ grupoId, dia, bloqueId: bloquesClase[i].id, bloqueNumero: bloquesClase[i].numero })
+            huecosNoReparables.push({ tipo: 'huecoIntermedio', grupoId, dia, bloqueId: bloquesClase[i].id, bloqueNumero: bloquesClase[i].numero })
             break
           }
         }
+      }
+
+      // Si, además de lo anterior, no había suficientes lecciones reales
+      // para llegar al mínimo exigido (sin importar si el backtracking de
+      // arriba tuvo éxito o no compactando lo que sí hay), se reporta la
+      // salida temprana como un problema aparte — es información distinta
+      // a un hueco intermedio: acá no falta reordenar, falta CARGA.
+      if (hayFaltante) {
+        huecosNoReparables.push({
+          tipo: 'salidaTemprana',
+          grupoId,
+          dia,
+          leccionesReales: cantidadReal,
+          minimoExigido: minimoLeccionesPorDia,
+        })
       }
     }
   }
