@@ -101,7 +101,7 @@ function construirUnidades(profesores) {
 // `tamano` bloques de tipo 'clase' (los recreos/almuerzo atravesados no se
 // incluyen en el resultado, porque no se "ocupan", solo se permite que
 // estén en medio del tramo).
-function construirTramosConsecutivos(bloquesTodos, tamano, permitirAtravesarRecreos = false, puedeAtravesarAlmuerzo = false) {
+export function construirTramosConsecutivos(bloquesTodos, tamano, permitirAtravesarRecreos = false, puedeAtravesarAlmuerzo = false) {
   if (!permitirAtravesarRecreos) {
     // Comportamiento estricto de siempre: ventana de `tamano` bloques
     // consecutivos en la grilla, todos de tipo 'clase'.
