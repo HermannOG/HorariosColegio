@@ -4,6 +4,7 @@ import {
   obtenerHorarioActual, guardarHorario, obtenerMallas, DIAS,
 } from '../lib/datos.js'
 import { generarHorario } from '../lib/generador.js'
+import { validarYAplicarMovimiento } from '../lib/validarMovimiento.js'
 import { PageHeader, Button, Card, Select, Spinner, EmptyState, Pill } from '../components/ui.jsx'
 
 const DIAS_LABEL = { lunes: 'Lunes', martes: 'Martes', miercoles: 'Miércoles', jueves: 'Jueves', viernes: 'Viernes' }
@@ -20,6 +21,8 @@ export default function HorarioPage() {
   const [vista, setVista] = useState('profesor') // 'profesor' | 'grupo'
   const [seleccionId, setSeleccionId] = useState('')
   const [modoReparto, setModoReparto] = useState('parejo') // 'parejo' | 'temprano'
+  const [alertaMovimiento, setAlertaMovimiento] = useState(null)
+  const [guardandoMovimiento, setGuardandoMovimiento] = useState(false)
 
   async function cargarTodo() {
     const [profs, gr, mat, grilla, hor, malla] = await Promise.all([
@@ -87,6 +90,31 @@ export default function HorarioPage() {
     setGenerando(false)
   }
 
+  // Maneja el resultado de soltar una clase arrastrada en la vista "Por
+  // grupo": valida el movimiento con las mismas reglas duras del
+  // generador y, si es válido, actualiza y guarda el horario; si no, deja
+  // el horario intacto y muestra una alerta con el motivo exacto.
+  async function manejarSoltar(origen, destino) {
+    const resultado = validarYAplicarMovimiento({
+      origen,
+      destino,
+      horario,
+      contexto: { bloques, grupos, mallas },
+    })
+
+    if (!resultado.valido) {
+      setAlertaMovimiento(resultado.motivo)
+      return
+    }
+
+    setAlertaMovimiento(null)
+    setGuardandoMovimiento(true)
+    const nuevoHorario = { ...horario, asignaciones: resultado.nuevasAsignaciones }
+    await guardarHorario(nuevoHorario)
+    setHorario(nuevoHorario)
+    setGuardandoMovimiento(false)
+  }
+
   const mapaMaterias = Object.fromEntries(materias.map(m => [m.id, m.nombre]))
   const mapaGrupos = Object.fromEntries(grupos.map(g => [g.id, g.nombre]))
   const mapaProfesores = Object.fromEntries(profesores.map(p => [p.id, p.nombre]))
@@ -133,6 +161,9 @@ export default function HorarioPage() {
               <AvisoDescartadas descartadas={horario.asignacionesDescartadas} mapaMaterias={mapaMaterias} />
             )}
             {huecosMalla.length > 0 && <AvisoHuecosMalla huecos={huecosMalla} />}
+            {alertaMovimiento && (
+              <AlertaMovimiento mensaje={alertaMovimiento} onCerrar={() => setAlertaMovimiento(null)} />
+            )}
 
             {horario.generadoEn && (
               <ResumenGeneracion horario={horario} mapaProfesores={mapaProfesores} mapaGrupos={mapaGrupos} mapaMaterias={mapaMaterias} />
@@ -153,19 +184,37 @@ export default function HorarioPage() {
             {!horario.generadoEn ? (
               <EmptyState title="Aún no generaste un horario" description="Hacé clic en «Generar horario» arriba para crear la primera versión." />
             ) : seleccionId ? (
-              <TablaHorario
-                bloques={bloques}
-                asignaciones={horario.asignaciones}
-                modo={vista}
-                idSeleccionado={seleccionId}
-                mapaMaterias={mapaMaterias}
-                mapaGrupos={mapaGrupos}
-                mapaProfesores={mapaProfesores}
-              />
+              <>
+                {vista === 'grupo' && (
+                  <p className="text-xs text-ink-400 mb-2">
+                    Podés arrastrar una clase a otro espacio para moverla, o soltarla sobre otra para intercambiarlas. Los cambios se guardan al instante.
+                  </p>
+                )}
+                <TablaHorario
+                  bloques={bloques}
+                  asignaciones={horario.asignaciones}
+                  modo={vista}
+                  idSeleccionado={seleccionId}
+                  mapaMaterias={mapaMaterias}
+                  mapaGrupos={mapaGrupos}
+                  mapaProfesores={mapaProfesores}
+                  editable={vista === 'grupo' && !guardandoMovimiento}
+                  onSoltar={manejarSoltar}
+                />
+              </>
             ) : null}
           </>
         )}
       </div>
+    </div>
+  )
+}
+
+function AlertaMovimiento({ mensaje, onCerrar }) {
+  return (
+    <div className="mb-4 px-4 py-3 rounded-md bg-clay-50 border border-clay-300 text-sm text-clay-800 flex items-start justify-between gap-3">
+      <p><span className="font-medium">No se pudo mover esa clase:</span> {mensaje}</p>
+      <button onClick={onCerrar} className="text-clay-500 hover:text-clay-700 shrink-0">✕</button>
     </div>
   )
 }
@@ -262,12 +311,36 @@ function ResumenGeneracion({ horario, mapaProfesores, mapaGrupos, mapaMaterias }
   )
 }
 
-function TablaHorario({ bloques, asignaciones, modo, idSeleccionado, mapaMaterias, mapaGrupos, mapaProfesores }) {
+function TablaHorario({ bloques, asignaciones, modo, idSeleccionado, mapaMaterias, mapaGrupos, mapaProfesores, editable, onSoltar }) {
+  const [arrastrando, setArrastrando] = useState(null) // la asignación que se está arrastrando
+  const [sobreCelda, setSobreCelda] = useState(null) // `${dia}|${bloqueId}` sobre la que está pasando el arrastre
+
   function celda(dia, bloqueId) {
     return asignaciones.find(a => {
       if (a.dia !== dia || a.bloqueId !== bloqueId) return false
       return modo === 'profesor' ? a.profesorId === idSeleccionado : a.grupoId === idSeleccionado
     })
+  }
+
+  function manejarDragStart(asignacion) {
+    if (!editable) return
+    setArrastrando(asignacion)
+  }
+
+  function manejarDragOver(e, dia, bloqueId) {
+    if (!editable || !arrastrando) return
+    e.preventDefault()
+    setSobreCelda(`${dia}|${bloqueId}`)
+  }
+
+  function manejarDrop(e, dia, bloqueId) {
+    if (!editable || !arrastrando) return
+    e.preventDefault()
+    setSobreCelda(null)
+    const origen = arrastrando
+    setArrastrando(null)
+    if (origen.dia === dia && origen.bloqueId === bloqueId) return // soltó en el mismo lugar
+    onSoltar(origen, { dia, bloqueId })
   }
 
   return (
@@ -300,10 +373,23 @@ function TablaHorario({ bloques, asignaciones, modo, idSeleccionado, mapaMateria
                 <td className="px-3 py-2 text-ink-600 font-semibold">{b.numero}</td>
                 {DIAS.map(dia => {
                   const a = celda(dia, b.id)
+                  const claveCelda = `${dia}|${b.id}`
+                  const esDestinoActivo = editable && arrastrando && sobreCelda === claveCelda
                   return (
-                    <td key={dia} className="px-3 py-2 align-top">
+                    <td
+                      key={dia}
+                      className={`px-3 py-2 align-top transition-colors ${esDestinoActivo ? 'bg-sage-100 ring-1 ring-inset ring-sage-400' : ''}`}
+                      onDragOver={e => manejarDragOver(e, dia, b.id)}
+                      onDragLeave={() => setSobreCelda(prev => (prev === claveCelda ? null : prev))}
+                      onDrop={e => manejarDrop(e, dia, b.id)}
+                    >
                       {a ? (
-                        <div>
+                        <div
+                          draggable={editable}
+                          onDragStart={() => manejarDragStart(a)}
+                          onDragEnd={() => { setArrastrando(null); setSobreCelda(null) }}
+                          className={editable ? 'cursor-grab active:cursor-grabbing rounded-md px-1.5 py-1 -mx-1.5 -my-1 hover:bg-ink-50 transition-colors' : ''}
+                        >
                           <p className="font-medium text-ink-900">{mapaMaterias[a.materiaId]}</p>
                           <p className="text-xs text-ink-400">
                             {modo === 'profesor' ? mapaGrupos[a.grupoId] : mapaProfesores[a.profesorId]}
