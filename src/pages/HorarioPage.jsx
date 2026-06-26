@@ -119,6 +119,16 @@ export default function HorarioPage() {
   const mapaGrupos = Object.fromEntries(grupos.map(g => [g.id, g.nombre]))
   const mapaProfesores = Object.fromEntries(profesores.map(p => [p.id, p.nombre]))
 
+  // Para cada profesor, la lista de nombres de materias que da (sin
+  // repetir), derivada de sus asignaciones — se usa para mostrarlas junto
+  // al nombre en el selector de la vista "Por profesor".
+  const mapaMateriasPorProfesor = Object.fromEntries(
+    profesores.map(p => {
+      const nombresUnicos = [...new Set((p.asignaciones || []).map(a => mapaMaterias[a.materiaId]).filter(Boolean))]
+      return [p.id, nombresUnicos]
+    })
+  )
+
   const listaSeleccion = vista === 'profesor' ? profesores : grupos
 
   // Compara, para cada grupo, lo que pide la malla de su año contra lo que
@@ -175,9 +185,17 @@ export default function HorarioPage() {
                 <Pill tone="ink" active={vista === 'grupo'} onClick={() => { setVista('grupo'); setSeleccionId(grupos[0]?.id || '') }}>Por grupo</Pill>
               </div>
               <Select value={seleccionId} onChange={e => setSeleccionId(e.target.value)} className="max-w-xs">
-                {listaSeleccion.map(item => (
-                  <option key={item.id} value={item.id}>{item.nombre}</option>
-                ))}
+                {vista === 'profesor'
+                  ? listaSeleccion.map(item => {
+                      const materiasDelProfe = mapaMateriasPorProfesor[item.id] || []
+                      const etiqueta = materiasDelProfe.length > 0
+                        ? `${item.nombre} — ${materiasDelProfe.join(', ')}`
+                        : `${item.nombre} (sin materias asignadas)`
+                      return <option key={item.id} value={item.id}>{etiqueta}</option>
+                    })
+                  : listaSeleccion.map(item => (
+                      <option key={item.id} value={item.id}>{item.nombre}</option>
+                    ))}
               </Select>
             </div>
 
