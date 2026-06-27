@@ -50,6 +50,14 @@
 //    `compactarHuecos`): el tramo objetivo de cada grupo+día nunca es
 //    más corto que ese mínimo, aunque eso signifique reportar un hueco
 //    sin reparar si no hay suficientes lecciones ese día para llenarlo.
+// 7. AYUDA CRUZADA entre grupos al compactar huecos: si, para cerrar un
+//    hueco de un grupo, la única lección disponible para ese hueco tiene
+//    a su profesor ocupado en OTRO grupo a esa misma hora, antes de
+//    rendirse se intenta reacomodar esa clase del otro grupo (con su
+//    propio backtracking independiente) para liberar el bloque. Si esa
+//    ayuda no se termina usando (el camino que la motivó se descarta más
+//    adelante), se revierte por completo — nunca queda un cambio a medio
+//    aplicar ni se empeora un grupo que ya estaba bien.
 // ========================================================================
 
 function construirUnidades(profesores) {
@@ -524,6 +532,31 @@ export function generarHorario({ profesores, dias, bloques, modoReparto = 'parej
 // grupo no tiene suficientes lecciones para llegar al mínimo, el "hueco"
 // que queda entre la última lección real y el mínimo se reporta como
 // salida temprana, no se inventa una clase para llenarlo.
+// ========================================================================
+// COMPACTACIÓN DE HUECOS — con ayuda cruzada AISLADA entre grupos.
+// ------------------------------------------------------------------------
+// El backtracking principal sigue siendo, como siempre, INDEPENDIENTE por
+// grupo+día — esto es deliberado y crítico: un backtracking único que
+// intente resolver varios grupos a la vez puede, al fallar para uno de
+// ellos (por ejemplo porque ese grupo genuinamente no tiene margen),
+// retroceder y deshacer soluciones que YA estaban bien en otro grupo,
+// dejándolo peor de lo que estaba. Esa fue una primera implementación que
+// se probó y se descartó por ese motivo exacto.
+//
+// En cambio, cuando el backtracking de UN grupo encuentra que el tramo que
+// necesita está ocupado por el mismo profesor en OTRO grupo, intenta —
+// como un paso adicional, antes de descartar esa opción— "pedir ayuda":
+// ejecuta un backtracking SEPARADO e INDEPENDIENTE sobre ese otro grupo,
+// para ver si esa lección puntual se puede reubicar dentro de su propio
+// día sin generar un hueco. Si la ayuda tiene éxito, el cambio en el otro
+// grupo se aplica de forma permanente ahí mismo (no depende de que el
+// grupo que pidió ayuda termine teniendo éxito) — porque ese movimiento,
+// por sí solo, deja al otro grupo igual de compacto que antes, solo en
+// otra posición; no hay motivo para revertirlo después. Si la ayuda
+// falla, se descarta sin tocar nada y se sigue probando como si esa
+// opción no hubiera existido — el grupo ayudante nunca queda peor.
+// ========================================================================
+
 function compactarHuecos({ bloques, bloquesClase, dias, grupos, asignaciones, ocupacionProfesor, ocupacionGrupo, minimoLeccionesPorDia = 0 }) {
   function kProf(profId, dia, bloqueId) { return `${profId}|${dia}|${bloqueId}` }
   function kGrupo(grupoId, dia, bloqueId) { return `${grupoId}|${dia}|${bloqueId}` }
@@ -578,116 +611,322 @@ function compactarHuecos({ bloques, bloquesClase, dias, grupos, asignaciones, oc
     return unidades
   }
 
+  // Identifica, para un profesor y un bloqueId en un día dado, a qué grupo
+  // pertenece la clase que lo está ocupando AHORA MISMO (mirando el estado
+  // real y actual de `asignaciones`, que para el momento en que se llama
+  // esta función ya refleja cualquier compactación previa de otros
+  // grupos+días, porque la función avanza grupo por grupo, día por día,
+  // siempre sobre el array real).
+  function encontrarGrupoOcupante(profesorId, dia, bloqueId) {
+    const hit = asignaciones.find(a => a.profesorId === profesorId && a.dia === dia && a.bloqueId === bloqueId)
+    return hit ? hit.grupoId : null
+  }
+
+  const PROFUNDIDAD_MAXIMA_AYUDA = 2
+  let ayudasIntentadas = 0
+  const TOPE_AYUDAS = 5000 // límite de seguridad para no descontrolar el tiempo de cómputo
+
+  // Intenta compactar el grupo+día indicado, exactamente con la misma
+  // lógica de backtracking que existía antes (independiente, nunca
+  // acoplada a otros grupos). La única diferencia respecto a la versión
+  // original es que, cuando una unidad no puede colocarse porque su
+  // profesor está ocupado en OTRO grupo a esa hora, antes de descartar esa
+  // opción se intenta `pedirAyuda` para liberar ese bloque en el otro
+  // grupo. Devuelve `true`/`false` igual que antes.
+  function compactarGrupoDia(grupoId, dia, asignacionesDelDia, objetivoEfectivo) {
+    const unidadesMoviles = agruparEnUnidadesMoviles(asignacionesDelDia)
+    const idsObjetivoEfectivo = objetivoEfectivo.map(b => b.id)
+
+    function tramosDentroDelObjetivo(unidad) {
+      const todos = tramosValidosPara(unidad.tamano, unidad.esContinua, unidad.puedeAtravesarAlmuerzo)
+      return todos.filter(tramo => tramo.every(b => idsObjetivoEfectivo.includes(b.id)))
+    }
+
+    // Liberamos temporalmente la ocupación de este grupo+día.
+    for (const a of asignacionesDelDia) {
+      delete ocupacionProfesor[kProf(a.profesorId, dia, a.bloqueId)]
+      delete ocupacionGrupo[kGrupo(a.grupoId, dia, a.bloqueId)]
+    }
+
+    const pendientes = [...unidadesMoviles]
+    const asignacionTramo = {}
+    const ocupadoLocal = new Set()
+
+    // Intenta resolver, mediante un backtracking SEPARADO e
+    // INDEPENDIENTE, un único bloqueo puntual: la clase del
+    // `profesorBloqueante` que ocupa `bloqueId` en `grupoOcupante`, ese
+    // mismo día. Si logra reubicarla (junto con cualquier otra unidad de
+    // ese grupo que haga falta reacomodar) dentro de su propio grupo+día
+    // sin generar un hueco nuevo, aplica el cambio de inmediato y devuelve
+    // un objeto `{ exito, deshacer }` — el llamador es responsable de
+    // invocar `deshacer()` si más adelante decide no usar este camino.
+    //
+    // A diferencia de un simple "mover esa unidad a otro
+    // lado" (que falla en casos donde liberar esa posición requiere
+    // reacomodar VARIAS unidades de ese grupo a la vez, no solo una), esta
+    // función ejecuta un backtracking COMPLETO e INDEPENDIENTE sobre todo
+    // el día de `grupoOcupante`, con la única restricción extra de que el
+    // profesor bloqueante no puede usar `bloqueId`. Si encuentra un
+    // reordenamiento completo y compacto (sin huecos) que respeta esa
+    // restricción, lo aplica de inmediato y de forma permanente. Si no,
+    // no toca nada y devuelve `false`.
+    function pedirAyuda(grupoOcupante, bloqueId, profesorBloqueante, profundidadRestante) {
+      if (profundidadRestante <= 0) return false
+      ayudasIntentadas++
+      if (ayudasIntentadas > TOPE_AYUDAS) return false
+
+      const asignacionesOcupante = asignaciones.filter(a => a.grupoId === grupoOcupante && a.dia === dia)
+      if (asignacionesOcupante.length === 0) return false
+
+      const cantidadRealOcupante = asignacionesOcupante.length
+      const cantidadObjetivoOcupante = Math.max(cantidadRealOcupante, minimoLeccionesPorDia)
+      const hayFaltanteOcupante = cantidadObjetivoOcupante > cantidadRealOcupante
+      const objetivoOcupante = hayFaltanteOcupante
+        ? bloquesClase.slice(0, cantidadRealOcupante)
+        : bloquesClase.slice(0, cantidadObjetivoOcupante)
+      const idsObjetivoOcupante = new Set(objetivoOcupante.map(b => b.id))
+
+      const unidadesOcupante = agruparEnUnidadesMoviles(asignacionesOcupante)
+
+      // Liberamos temporalmente la ocupación de este grupo+día (igual que
+      // hace `compactarGrupoDia`), para poder probar reordenamientos.
+      for (const a of asignacionesOcupante) {
+        delete ocupacionProfesor[kProf(a.profesorId, dia, a.bloqueId)]
+        delete ocupacionGrupo[kGrupo(a.grupoId, dia, a.bloqueId)]
+      }
+
+      const pendientesOcupante = [...unidadesOcupante]
+      const asignacionTramoOcupante = {}
+      const ocupadoLocalOcupante = new Set()
+
+      function tramosDentroDelObjetivoOcupante(unidad) {
+        const todos = tramosValidosPara(unidad.tamano, unidad.esContinua, unidad.puedeAtravesarAlmuerzo)
+        return todos.filter(tramo => tramo.every(b => idsObjetivoOcupante.has(b.id)))
+      }
+
+      function backtrackOcupante() {
+        const primerLibre = objetivoOcupante.find(b => !ocupadoLocalOcupante.has(b.id))
+        if (!primerLibre) return true
+
+        for (let i = 0; i < pendientesOcupante.length; i++) {
+          const unidad = pendientesOcupante[i]
+          if (!unidad) continue
+
+          const tramos = tramosDentroDelObjetivoOcupante(unidad)
+          for (const tramo of tramos) {
+            if (tramo[0].id !== primerLibre.id) continue
+            if (tramo.some(b => ocupadoLocalOcupante.has(b.id))) continue
+
+            // Restricción extra: el profesor bloqueante no puede usar el
+            // bloque que necesita liberar para el grupo que pidió ayuda.
+            if (unidad.profesorId === profesorBloqueante && tramo.some(b => b.id === bloqueId)) continue
+
+            const claves = tramo.map(b => kProf(unidad.profesorId, dia, b.id))
+            // No se permite cascada de 2º nivel dentro de esta sub-búsqueda
+            // (mantenemos la recursión de ayuda acotada y predecible): si
+            // el tramo choca con otro grupo, simplemente se descarta como
+            // opción aquí, igual que el backtracking original siempre hizo
+            // antes de esta mejora.
+            if (claves.some(k => ocupacionProfesor[k])) continue
+
+            claves.forEach(k => { ocupacionProfesor[k] = true })
+            tramo.forEach(b => ocupadoLocalOcupante.add(b.id))
+            asignacionTramoOcupante[primerLibre.id] = { unidad, bloquesDestino: tramo }
+            pendientesOcupante[i] = null
+
+            if (backtrackOcupante()) return true
+
+            claves.forEach(k => { delete ocupacionProfesor[k] })
+            tramo.forEach(b => ocupadoLocalOcupante.delete(b.id))
+            delete asignacionTramoOcupante[primerLibre.id]
+            pendientesOcupante[i] = unidad
+          }
+        }
+        return false
+      }
+
+      const exitoOcupante = backtrackOcupante()
+
+      if (exitoOcupante) {
+        // Guardamos el estado ORIGINAL (antes de este cambio) para poder
+        // deshacerlo si el backtracking del grupo que pidió ayuda termina
+        // retrocediendo más allá de este punto.
+        const estadoOriginal = asignacionesOcupante.map(a => ({ asig: a, bloqueIdOriginal: a.bloqueId }))
+
+        for (const entrada of Object.values(asignacionTramoOcupante)) {
+          const { unidad, bloquesDestino } = entrada
+          unidad.asignacionesOrdenadas.forEach((asig, k) => {
+            asig.bloqueId = bloquesDestino[k].id
+          })
+          bloquesDestino.forEach(b => {
+            ocupacionGrupo[kGrupo(grupoOcupante, dia, b.id)] = true
+          })
+        }
+
+        return {
+          exito: true,
+          deshacer: () => {
+            // Revertir ocupacionGrupo y ocupacionProfesor a lo que estaba
+            // antes de este cambio puntual, y restaurar bloqueId original.
+            for (const a of asignacionesOcupante) {
+              delete ocupacionProfesor[kProf(a.profesorId, dia, a.bloqueId)]
+              delete ocupacionGrupo[kGrupo(a.grupoId, dia, a.bloqueId)]
+            }
+            for (const { asig, bloqueIdOriginal } of estadoOriginal) {
+              asig.bloqueId = bloqueIdOriginal
+            }
+            for (const a of asignacionesOcupante) {
+              ocupacionProfesor[kProf(a.profesorId, dia, a.bloqueId)] = true
+              ocupacionGrupo[kGrupo(a.grupoId, dia, a.bloqueId)] = true
+            }
+          },
+        }
+      }
+
+      // No se encontró reordenamiento válido: restaurar todo a su estado
+      // original antes de devolver false, para no dejar nada corrupto.
+      for (const a of asignacionesOcupante) {
+        ocupacionProfesor[kProf(a.profesorId, dia, a.bloqueId)] = true
+        ocupacionGrupo[kGrupo(a.grupoId, dia, a.bloqueId)] = true
+      }
+      return false
+    }
+
+    // NOTA sobre las "ayudas aplicadas": una primera versión de este
+    // mecanismo dejaba las ayudas exitosas aplicadas de forma permanente,
+    // asumiendo que una ayuda exitosa nunca podía perjudicar a nadie (deja
+    // al grupo ayudante igual de compacto, solo en otra posición). Las
+    // pruebas mostraron que esa suposición era incorrecta: aunque el grupo
+    // ayudante queda bien, la ayuda puede consumir un recurso (cierto
+    // profesor libre en cierto bloque) que el propio backtracking del
+    // grupo que pidió ayuda necesitaba para una opción DISTINTA, más
+    // adelante en su búsqueda. Por eso cada ayuda ahora se deshace si el
+    // intento puntual que la motivó termina retrocediendo (ver
+    // `ayudasDeEsteIntento` más abajo) — la ayuda es tan reversible como
+    // cualquier otro paso del backtracking.
+
+    function backtrack() {
+      const primerLibre = objetivoEfectivo.find(b => !ocupadoLocal.has(b.id))
+      if (!primerLibre) return true
+
+      for (let i = 0; i < pendientes.length; i++) {
+        const unidad = pendientes[i]
+        if (!unidad) continue
+
+        const tramos = tramosDentroDelObjetivo(unidad)
+        for (const tramo of tramos) {
+          if (tramo[0].id !== primerLibre.id) continue
+          if (tramo.some(b => ocupadoLocal.has(b.id))) continue
+
+          const claves = tramo.map(b => kProf(unidad.profesorId, dia, b.id))
+          const bloqueado = claves.some(k => ocupacionProfesor[k])
+
+          const ayudasDeEsteIntento = []
+          let viable = true
+
+          if (bloqueado) {
+            // Antes de descartar esta opción, intentamos pedir ayuda para
+            // cada bloque bloqueado por otro grupo. Cada ayuda exitosa se
+            // registra en `ayudasDeEsteIntento` para poder deshacerla si
+            // este intento puntual termina retrocediendo.
+            for (const bloque of tramo) {
+              const clave = kProf(unidad.profesorId, dia, bloque.id)
+              if (!ocupacionProfesor[clave]) continue
+              const otroGrupo = encontrarGrupoOcupante(unidad.profesorId, dia, bloque.id)
+              if (!otroGrupo || otroGrupo === grupoId) { viable = false; break }
+              const resultadoAyuda = pedirAyuda(otroGrupo, bloque.id, unidad.profesorId, PROFUNDIDAD_MAXIMA_AYUDA)
+              if (!resultadoAyuda) { viable = false; break }
+              ayudasDeEsteIntento.push(resultadoAyuda)
+            }
+            if (!viable) {
+              // Deshacer cualquier ayuda que sí se haya aplicado en este
+              // intento puntual antes de descartarlo — no queremos dejar
+              // cambios a medio aplicar si este camino no se usa.
+              ayudasDeEsteIntento.forEach(a => a.deshacer())
+              continue
+            }
+            // Todos los bloqueos se resolvieron: re-chequeamos antes de colocar.
+            if (claves.some(k => ocupacionProfesor[k])) {
+              ayudasDeEsteIntento.forEach(a => a.deshacer())
+              continue // por seguridad, no debería pasar
+            }
+          }
+
+          claves.forEach(k => { ocupacionProfesor[k] = true })
+          tramo.forEach(b => ocupadoLocal.add(b.id))
+          asignacionTramo[primerLibre.id] = { unidad, bloquesDestino: tramo }
+          pendientes[i] = null
+
+          if (backtrack()) return true
+
+          // deshacer: tanto lo de este grupo como cualquier ayuda externa
+          // que se haya aplicado específicamente para este intento puntual
+          // — si este camino no llevó a una solución completa, no debe
+          // quedar ningún cambio externo colgando.
+          claves.forEach(k => { delete ocupacionProfesor[k] })
+          tramo.forEach(b => ocupadoLocal.delete(b.id))
+          delete asignacionTramo[primerLibre.id]
+          pendientes[i] = unidad
+          ayudasDeEsteIntento.forEach(a => a.deshacer())
+        }
+      }
+      return false
+    }
+
+    const exito = backtrack()
+
+    if (exito) {
+      for (const entrada of Object.values(asignacionTramo)) {
+        const { unidad, bloquesDestino } = entrada
+        unidad.asignacionesOrdenadas.forEach((asig, k) => {
+          asig.bloqueId = bloquesDestino[k].id
+        })
+        bloquesDestino.forEach(b => {
+          ocupacionGrupo[kGrupo(grupoId, dia, b.id)] = true
+        })
+      }
+      return true
+    } else {
+      // Restaurar las posiciones originales de ESTE grupo (las ayudas
+      // externas que sí tuvieron éxito durante el intento permanecen,
+      // como ya se explicó).
+      for (const a of asignacionesDelDia) {
+        ocupacionProfesor[kProf(a.profesorId, dia, a.bloqueId)] = true
+        ocupacionGrupo[kGrupo(a.grupoId, dia, a.bloqueId)] = true
+      }
+      return false
+    }
+  }
+
   for (const grupoId of grupos) {
     for (const dia of dias) {
       const asignacionesDelDia = asignaciones.filter(a => a.grupoId === grupoId && a.dia === dia)
       if (asignacionesDelDia.length === 0) continue
 
       const cantidadReal = asignacionesDelDia.length
-      // El tramo objetivo nunca es más corto que el mínimo exigido (no se
-      // sale antes del almuerzo), aunque eso signifique que, si la cantidad
-      // real de lecciones es menor, quede un hueco al final que no se va a
-      // poder cerrar con clases reales — eso se detecta más abajo y se
-      // reporta como salida temprana, en vez de comprimirse en silencio.
       const cantidadObjetivo = Math.max(cantidadReal, minimoLeccionesPorDia)
       const bloquesObjetivo = bloquesClase.slice(0, cantidadObjetivo)
 
       const idsObjetivo = new Set(bloquesObjetivo.map(b => b.id))
       const yaCompacto = cantidadReal === cantidadObjetivo && asignacionesDelDia.every(a => idsObjetivo.has(a.bloqueId))
-      if (yaCompacto) continue
 
-      const unidadesMoviles = agruparEnUnidadesMoviles(asignacionesDelDia)
-
-      // Cuántas posiciones del objetivo realmente se pueden llenar: si la
-      // cantidad de lecciones reales (cantidadReal) es menor que el
-      // objetivo, las últimas posiciones (cantidadObjetivo - cantidadReal)
-      // jamás se van a poder cubrir con las unidades disponibles — no hay
-      // más clases que mover. Eso no es un fallo del backtracking: es una
-      // salida temprana real. En ese caso, el objetivo CONTRA EL QUE
-      // efectivamente compactamos pasa a ser solo `cantidadReal` (sin
-      // hueco en medio de lo que sí hay), y la salida temprana se reporta
-      // aparte, siempre.
       const hayFaltante = cantidadObjetivo > cantidadReal
       const objetivoEfectivo = hayFaltante ? bloquesClase.slice(0, cantidadReal) : bloquesObjetivo
-      const idsObjetivoEfectivo = objetivoEfectivo.map(b => b.id)
 
-      function tramosDentroDelObjetivo(unidad) {
-        const todos = tramosValidosPara(unidad.tamano, unidad.esContinua, unidad.puedeAtravesarAlmuerzo)
-        return todos.filter(tramo => tramo.every(b => idsObjetivoEfectivo.includes(b.id)))
-      }
-
-      // Liberamos temporalmente la ocupación de este grupo+día.
-      for (const a of asignacionesDelDia) {
-        delete ocupacionProfesor[kProf(a.profesorId, dia, a.bloqueId)]
-        delete ocupacionGrupo[kGrupo(a.grupoId, dia, a.bloqueId)]
-      }
-
-      const pendientes = [...unidadesMoviles]
-      // asignacionTramo: bloqueId (del primer bloque del tramo) -> { unidad, bloquesDestino }
-      const asignacionTramo = {}
-      const ocupadoLocal = new Set()
-
-      function backtrack() {
-        // Buscar la primera posición (en orden del objetivo efectivo) que
-        // todavía no esté ocupada en este intento.
-        const primerLibre = objetivoEfectivo.find(b => !ocupadoLocal.has(b.id))
-        if (!primerLibre) return true // todo el objetivo efectivo quedó cubierto, éxito
-
-        for (let i = 0; i < pendientes.length; i++) {
-          const unidad = pendientes[i]
-          if (!unidad) continue
-
-          const tramos = tramosDentroDelObjetivo(unidad)
-          for (const tramo of tramos) {
-            if (tramo[0].id !== primerLibre.id) continue // debe empezar justo en el primer hueco libre
-            if (tramo.some(b => ocupadoLocal.has(b.id))) continue // se solaparía con algo ya puesto
-
-            const claves = tramo.map(b => kProf(unidad.profesorId, dia, b.id))
-            if (claves.some(k => ocupacionProfesor[k])) continue // choque con otro grupo
-
-            claves.forEach(k => { ocupacionProfesor[k] = true })
-            tramo.forEach(b => ocupadoLocal.add(b.id))
-            asignacionTramo[primerLibre.id] = { unidad, bloquesDestino: tramo }
-            pendientes[i] = null
-
-            if (backtrack()) return true
-
-            // deshacer
-            claves.forEach(k => { delete ocupacionProfesor[k] })
-            tramo.forEach(b => ocupadoLocal.delete(b.id))
-            delete asignacionTramo[primerLibre.id]
-            pendientes[i] = unidad
-          }
-        }
-        return false
-      }
-
-      const exito = backtrack()
-
-      if (exito) {
-        for (const entrada of Object.values(asignacionTramo)) {
-          const { unidad, bloquesDestino } = entrada
-          unidad.asignacionesOrdenadas.forEach((asig, k) => {
-            asig.bloqueId = bloquesDestino[k].id
-          })
-          bloquesDestino.forEach(b => {
-            ocupacionGrupo[kGrupo(grupoId, dia, b.id)] = true
-          })
-        }
-      } else {
-        // No se encontró ningún reordenamiento válido sin choques: se
-        // restauran las posiciones originales.
-        for (const a of asignacionesDelDia) {
-          ocupacionProfesor[kProf(a.profesorId, dia, a.bloqueId)] = true
-          ocupacionGrupo[kGrupo(a.grupoId, dia, a.bloqueId)] = true
-        }
-        const ocupados = new Set(asignacionesDelDia.map(a => a.bloqueId))
-        for (let i = 0; i < bloquesClase.length; i++) {
-          if (ocupados.has(bloquesClase[i].id)) continue
-          const hayClaseDespues = bloquesClase.slice(i + 1).some(b => ocupados.has(b.id))
-          if (hayClaseDespues) {
-            huecosNoReparables.push({ tipo: 'huecoIntermedio', grupoId, dia, bloqueId: bloquesClase[i].id, bloqueNumero: bloquesClase[i].numero })
-            break
+      if (!yaCompacto) {
+        const exito = compactarGrupoDia(grupoId, dia, asignacionesDelDia, objetivoEfectivo)
+        if (!exito) {
+          // Re-leer las asignaciones actuales del grupo (pueden no haber
+          // cambiado, ya que en fallo se restauran a su posición original).
+          const actuales = asignaciones.filter(a => a.grupoId === grupoId && a.dia === dia)
+          const ocupados = new Set(actuales.map(a => a.bloqueId))
+          for (let i = 0; i < bloquesClase.length; i++) {
+            if (ocupados.has(bloquesClase[i].id)) continue
+            const hayClaseDespues = bloquesClase.slice(i + 1).some(b => ocupados.has(b.id))
+            if (hayClaseDespues) {
+              huecosNoReparables.push({ tipo: 'huecoIntermedio', grupoId, dia, bloqueId: bloquesClase[i].id, bloqueNumero: bloquesClase[i].numero })
+              break
+            }
           }
         }
       }
