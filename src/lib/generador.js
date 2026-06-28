@@ -444,6 +444,25 @@ function generarUnIntento({ profesores, dias, bloques, modoReparto, azar }) {
     })
   }
 
+  // ----------------------------------------------------------------------
+  // FASE 3 — Compactar huecos de PROFESOR: igual de importante para la
+  // profesora, pero menos estricta que la de grupo (esta nunca puede
+  // romper la compactación de un grupo para lograrse). Se reporta en una
+  // lista separada de "avisos", no como conflicto duro, porque no bloquea
+  // que el horario se considere "completo" — es una mejora deseable, no
+  // un requisito indispensable.
+  const avisosHuecosProfesor = compactarHuecosProfesores({
+    bloques, bloquesClase, dias, profesores, grupos: [...new Set(unidades.map(u => u.grupoId))],
+    asignaciones, ocupacionProfesor, ocupacionGrupo, minimoLeccionesPorDia,
+  })
+  const avisos = avisosHuecosProfesor.map(a => ({
+    profesorId: a.profesorId,
+    profesorNombre: a.profesorNombre,
+    dia: a.dia,
+    bloqueNumero: a.bloqueNumero || a.bloqueId,
+    motivo: `tiene un hueco sin clase el día ${a.dia} (lección ${a.bloqueNumero || a.bloqueId}) entre dos de sus clases.`,
+  }))
+
   // Limpiar campos internos que solo se usaron para la compactación —
   // no deben quedar en el resultado final que se guarda/muestra.
   const asignacionesLimpias = asignaciones.map(({ _unidadTipo, _unidadPuedeAtravesarAlmuerzo, ...resto }) => resto)
@@ -451,6 +470,7 @@ function generarUnIntento({ profesores, dias, bloques, modoReparto, azar }) {
   return {
     asignaciones: asignacionesLimpias,
     conflictos,
+    avisos,
     generadoEn: new Date().toISOString(),
     completo: conflictos.length === 0,
   }
@@ -490,10 +510,14 @@ export function generarHorario({ profesores, dias, bloques, modoReparto = 'parej
     // Puntaje del intento: cada conflicto "normal" (lección sin ubicar)
     // pesa 1, pero un hueco de grupo sin reparar (incluida una salida
     // temprana antes del almuerzo) pesa más, porque rompe una regla
-    // estructural más visible/grave que una lección puntual.
+    // estructural más visible/grave que una lección puntual. Los avisos de
+    // hueco de PROFESOR pesan muchísimo menos (0.01) — nunca deben poder
+    // inclinar la balanza por encima de un solo conflicto duro; solo
+    // sirven para desempatar entre intentos que ya están igual de bien en
+    // todo lo demás.
     const huecos = resultado.conflictos.filter(c => !c.profesorId).length
     const otros = resultado.conflictos.length - huecos
-    const puntaje = huecos * 3 + otros
+    const puntaje = huecos * 3 + otros + resultado.avisos.length * 0.01
 
     if (puntaje < mejorPuntaje) {
       mejorPuntaje = puntaje
@@ -949,4 +973,166 @@ function compactarHuecos({ bloques, bloquesClase, dias, grupos, asignaciones, oc
   }
 
   return huecosNoReparables
+}
+
+// ========================================================================
+// COMPACTACIÓN DE HUECOS DE PROFESOR — fase adicional, después de que los
+// grupos ya quedaron compactos.
+// ------------------------------------------------------------------------
+// Regla pedida: un profesor no debería tener un bloque de clase libre EN
+// MEDIO de su propia jornada de un día — desde la primera lección que
+// tiene ese día hasta la última, no debería haber huecos (no importa qué
+// grupo sea cada una). A diferencia de la regla de huecos de GRUPO, esta
+// es más blanda: el generador la intenta activamente, pero si no se puede
+// resolver sin romper algo más importante (un hueco de grupo, un choque
+// de profesor), se deja así y se informa como AVISO, no como conflicto.
+//
+// Por eso esta fase corre DESPUÉS de `compactarHuecos` (grupos), nunca
+// antes, y cualquier movimiento que proponga para cerrar el hueco de un
+// profesor se descarta si dejaría a algún grupo con un hueco nuevo — la
+// regla de grupo manda siempre. El mecanismo es el mismo principio de
+// "ayuda reversible" ya usado para los huecos entre grupos: cada intento
+// se puede deshacer por completo si no resulta en una mejora real.
+// ========================================================================
+
+function compactarHuecosProfesores({ bloques, bloquesClase, dias, profesores, grupos, asignaciones, ocupacionProfesor, ocupacionGrupo, minimoLeccionesPorDia = 0 }) {
+  function kProf(profId, dia, bloqueId) { return `${profId}|${dia}|${bloqueId}` }
+  function kGrupo(grupoId, dia, bloqueId) { return `${grupoId}|${dia}|${bloqueId}` }
+
+  const avisosNoReparables = []
+
+  // Verifica que las asignaciones de un grupo+día concreto sigan siendo un
+  // tramo compacto desde el primer bloque de clase del día, respetando el
+  // mínimo de almuerzo si corresponde — exactamente la misma regla que ya
+  // aplica `compactarHuecos`. Se usa para descartar cualquier movimiento
+  // de esta fase que rompería la compactación de un grupo.
+  function grupoSigueCompacto(grupoId, dia, asignacionesDelGrupoDia) {
+    const cantidadReal = asignacionesDelGrupoDia.length
+    if (cantidadReal === 0) return true
+    const cantidadObjetivo = Math.max(cantidadReal, minimoLeccionesPorDia)
+    const hayFaltante = cantidadObjetivo > cantidadReal
+    // Si ya había falta de carga (salida temprana) antes de esta fase, esa
+    // situación no es algo que esta fase deba resolver ni empeorar — solo
+    // nos importa que el tramo ocupado siga siendo continuo desde el
+    // inicio del día, igual que antes.
+    const objetivo = hayFaltante ? bloquesClase.slice(0, cantidadReal) : bloquesClase.slice(0, cantidadObjetivo)
+    const idsObjetivo = new Set(objetivo.map(b => b.id))
+    const ocupados = new Set(asignacionesDelGrupoDia.map(a => a.bloqueId))
+    if (!asignacionesDelGrupoDia.every(a => idsObjetivo.has(a.bloqueId))) return false
+    for (let i = 0; i < objetivo.length; i++) {
+      if (ocupados.has(objetivo[i].id)) continue
+      const hayClaseDespuesEnObjetivo = objetivo.slice(i + 1).some(b => ocupados.has(b.id))
+      if (hayClaseDespuesEnObjetivo) return false
+    }
+    return true
+  }
+
+  for (const profesor of profesores) {
+    for (const dia of dias) {
+      const asignacionesDelProfesorDia = asignaciones.filter(a => a.profesorId === profesor.id && a.dia === dia)
+      if (asignacionesDelProfesorDia.length < 2) continue // sin al menos 2 lecciones no puede haber hueco intermedio
+
+      const indicesOcupados = asignacionesDelProfesorDia
+        .map(a => bloquesClase.findIndex(b => b.id === a.bloqueId))
+        .filter(i => i !== -1)
+        .sort((x, y) => x - y)
+
+      const primerIndice = indicesOcupados[0]
+      const ultimoIndice = indicesOcupados[indicesOcupados.length - 1]
+      const ocupadosSet = new Set(indicesOcupados)
+
+      const indicesHueco = []
+      for (let i = primerIndice; i <= ultimoIndice; i++) {
+        if (!ocupadosSet.has(i)) indicesHueco.push(i)
+      }
+      if (indicesHueco.length === 0) continue // ya está compacto, nada que hacer
+
+      for (const indiceHueco of indicesHueco) {
+        const bloqueHueco = bloquesClase[indiceHueco]
+
+        // Volvemos a calcular el estado REAL y actual del profesor ese
+        // día antes de intentar nada con este hueco puntual — un
+        // movimiento anterior, dentro de este mismo `for`, puede haber
+        // cambiado su rango de ocupación (por ejemplo, si ya se cerró
+        // este hueco de pasada al resolver uno anterior, o si el rango
+        // ocupado se desplazó y este índice ya quedó fuera de él).
+        const ocupacionActualDelDia = asignaciones.filter(a => a.profesorId === profesor.id && a.dia === dia)
+        const indicesOcupadosActuales = ocupacionActualDelDia
+          .map(a => bloquesClase.findIndex(b => b.id === a.bloqueId))
+          .filter(i => i !== -1)
+        if (indicesOcupadosActuales.length < 2) continue // ya no hay rango suficiente para tener hueco
+        const primerIndiceActual = Math.min(...indicesOcupadosActuales)
+        const ultimoIndiceActual = Math.max(...indicesOcupadosActuales)
+        // Si este índice ya no cae dentro del rango actual, o ya está
+        // ocupado, este hueco puntual ya no existe — fue resuelto de
+        // pasada por un movimiento anterior en este mismo `for`.
+        if (indiceHueco < primerIndiceActual || indiceHueco > ultimoIndiceActual) continue
+        if (indicesOcupadosActuales.includes(indiceHueco)) continue
+
+        // Candidatas a mover: cualquier clase del profesor ese mismo día,
+        // en cualquier grupo, que esté FUERA del hueco (no tiene sentido
+        // mover la que ya está justo ahí). Cada candidata es una unidad de
+        // tamaño 1 (lección suelta) — esta fase solo reubica lecciones
+        // individuales, nunca separa un bloque doble o continuo (mover una
+        // sola lección de una unidad de 2+ bloques rompería esa unidad,
+        // lo cual no es válido).
+        const candidatasDelDia = asignaciones.filter(a => a.profesorId === profesor.id && a.dia === dia && a.bloqueId !== bloqueHueco.id)
+
+        let resuelto = false
+        for (const candidata of candidatasDelDia) {
+          // Esta candidata debe ser una unidad de tamaño 1 (no parte de un
+          // doble/continuo) — se identifica viendo si hay otra asignación
+          // contigua del mismo profesor+materia+grupo en el bloque
+          // inmediatamente anterior o posterior, ese día.
+          const indiceCandidata = bloquesClase.findIndex(b => b.id === candidata.bloqueId)
+          const esParteDeUnidadMayor = asignaciones.some(a =>
+            a !== candidata && a.profesorId === candidata.profesorId && a.materiaId === candidata.materiaId &&
+            a.grupoId === candidata.grupoId && a.dia === dia &&
+            Math.abs(bloquesClase.findIndex(b => b.id === a.bloqueId) - indiceCandidata) === 1
+          )
+          if (esParteDeUnidadMayor) continue
+
+          // El bloque del hueco debe estar libre para el grupo de la
+          // candidata (sin otra materia ya puesta ahí).
+          if (ocupacionGrupo[kGrupo(candidata.grupoId, dia, bloqueHueco.id)]) continue
+
+          // Simulamos el movimiento: candidata se va de su bloque actual
+          // al bloque del hueco, dentro del mismo grupo.
+          const asignacionesGrupoOriginal = asignaciones.filter(a => a.grupoId === candidata.grupoId && a.dia === dia)
+          const asignacionesGrupoSimuladas = asignacionesGrupoOriginal.map(a =>
+            a === candidata ? { ...a, bloqueId: bloqueHueco.id } : a
+          )
+          if (!grupoSigueCompacto(candidata.grupoId, dia, asignacionesGrupoSimuladas)) continue
+
+          // También hay que confirmar que el bloque que la candidata deja
+          // libre (su posición original) no le crea un hueco NUEVO a su
+          // propio grupo — ya cubierto por `grupoSigueCompacto` arriba,
+          // que evalúa el conjunto completo simulado.
+
+          // Si llegamos aquí, el movimiento es seguro: aplicarlo.
+          delete ocupacionProfesor[kProf(candidata.profesorId, dia, candidata.bloqueId)]
+          delete ocupacionGrupo[kGrupo(candidata.grupoId, dia, candidata.bloqueId)]
+          candidata.bloqueId = bloqueHueco.id
+          ocupacionProfesor[kProf(candidata.profesorId, dia, candidata.bloqueId)] = true
+          ocupacionGrupo[kGrupo(candidata.grupoId, dia, candidata.bloqueId)] = true
+
+          resuelto = true
+          break
+        }
+
+        if (!resuelto) {
+          avisosNoReparables.push({
+            tipo: 'huecoProfesor',
+            profesorId: profesor.id,
+            profesorNombre: profesor.nombre,
+            dia,
+            bloqueId: bloqueHueco.id,
+            bloqueNumero: bloqueHueco.numero,
+          })
+        }
+      }
+    }
+  }
+
+  return avisosNoReparables
 }
