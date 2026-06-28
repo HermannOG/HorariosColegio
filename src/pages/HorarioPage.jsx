@@ -17,7 +17,7 @@ export default function HorarioPage() {
   const [materias, setMaterias] = useState([])
   const [bloques, setBloques] = useState([])
   const [mallas, setMallas] = useState({})
-  const [horario, setHorario] = useState({ asignaciones: [], conflictos: [] })
+  const [horario, setHorario] = useState({ asignaciones: [], conflictos: [], avisos: [] })
   const [vista, setVista] = useState('profesor') // 'profesor' | 'grupo'
   const [seleccionId, setSeleccionId] = useState('')
   const [modoReparto, setModoReparto] = useState('parejo') // 'parejo' | 'temprano'
@@ -178,6 +178,9 @@ export default function HorarioPage() {
             {horario.generadoEn && (
               <ResumenGeneracion horario={horario} mapaProfesores={mapaProfesores} mapaGrupos={mapaGrupos} mapaMaterias={mapaMaterias} />
             )}
+            {horario.avisos?.length > 0 && (
+              <AvisoHuecosProfesor avisos={horario.avisos} />
+            )}
 
             <div className="flex items-center gap-3 mb-5 mt-2">
               <div className="flex gap-1.5">
@@ -300,6 +303,44 @@ function AvisoHuecosMalla({ huecos }) {
       </ul>
       <p className="mt-2 text-xs text-clay-600">
         Revisalo en «Profesores» o «Malla curricular» antes de generar, o generá igual y ajustá después.
+      </p>
+    </div>
+  )
+}
+
+// Agrupa los avisos de hueco de profesor por profesor+día, para mostrar
+// "Prof. X — lunes: lecciones 3°, 4°" en una sola línea en vez de una
+// línea por cada bloque suelto del mismo hueco.
+function agruparAvisosPorProfesorDia(avisos) {
+  const grupos = []
+  const indice = {} // `${profesorId}|${dia}` -> índice en `grupos`
+  avisos.forEach(a => {
+    const clave = `${a.profesorId}|${a.dia}`
+    if (!(clave in indice)) {
+      indice[clave] = grupos.length
+      grupos.push({ profesorNombre: a.profesorNombre, dia: a.dia, bloques: [] })
+    }
+    grupos[indice[clave]].bloques.push(a.bloqueNumero)
+  })
+  return grupos
+}
+
+function AvisoHuecosProfesor({ avisos }) {
+  const agrupados = agruparAvisosPorProfesorDia(avisos)
+  return (
+    <div className="mb-6 px-4 py-3 rounded-md bg-ink-50 border border-ink-200 text-sm text-ink-700">
+      <p className="font-medium mb-2 text-ink-800">
+        {agrupados.length} profesor(es) con un hueco entre dos de sus clases:
+      </p>
+      <ul className="space-y-1 text-ink-600">
+        {agrupados.map((g, i) => (
+          <li key={i}>
+            · {g.profesorNombre} — {DIAS_LABEL[g.dia]}: lección{g.bloques.length > 1 ? 'es' : ''} {g.bloques.join(', ')}
+          </li>
+        ))}
+      </ul>
+      <p className="mt-2 text-xs text-ink-500">
+        Esta regla es deseable pero no obligatoria — el generador la respeta solo cuando no afecta la malla de ningún grupo. Si querés, podés ajustarlo a mano en la vista «Por profesor».
       </p>
     </div>
   )
