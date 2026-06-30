@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import {
   listarProfesores, crearProfesor, actualizarProfesor, eliminarProfesor,
-  listarGrupos, listarMaterias, obtenerGrilla, obtenerMallas, DIAS,
+  listarGrupos, listarMaterias, listarActividades, obtenerGrilla, obtenerMallas, DIAS,
 } from '../lib/datos.js'
 import { PageHeader, Button, Card, Input, Select, Spinner, EmptyState, Pill } from '../components/ui.jsx'
 
@@ -21,6 +21,7 @@ export default function ProfesoresPage() {
   const [profesores, setProfesores] = useState([])
   const [grupos, setGrupos] = useState([])
   const [materias, setMaterias] = useState([])
+  const [actividades, setActividades] = useState([])
   const [bloquesClase, setBloquesClase] = useState([])
   const [mallas, setMallas] = useState({})
   const [editandoId, setEditandoId] = useState(null)
@@ -33,12 +34,13 @@ export default function ProfesoresPage() {
 
   useEffect(() => {
     async function cargar() {
-      const [profs, gr, mat, grilla, malla] = await Promise.all([
-        listarProfesores(), listarGrupos(), listarMaterias(), obtenerGrilla(), obtenerMallas(),
+      const [profs, gr, mat, act, grilla, malla] = await Promise.all([
+        listarProfesores(), listarGrupos(), listarMaterias(), listarActividades(), obtenerGrilla(), obtenerMallas(),
       ])
       setProfesores(profs)
       setGrupos(gr)
       setMaterias(mat)
+      setActividades(act)
       setBloquesClase(grilla.bloques.filter(b => b.tipo === 'clase'))
       setMallas(malla)
       setCargando(false)
@@ -94,7 +96,7 @@ export default function ProfesoresPage() {
     <div>
       <PageHeader
         title="Profesores"
-        subtitle="Datos de cada profesor: días libres, preferencias de horario, y qué materias da a qué grupos."
+        subtitle="Datos de cada profesor: días libres, preferencias de horario, qué materias da a qué grupos, y actividades del colegio que tenga a cargo."
         action={editandoId ? null : <Button onClick={empezarNuevo}>+ Nuevo profesor</Button>}
       />
       <div className="px-10 py-8">
@@ -110,6 +112,7 @@ export default function ProfesoresPage() {
             setForm={setForm}
             grupos={grupos}
             materias={materias}
+            actividades={actividades}
             bloquesClase={bloquesClase}
             mallas={mallas}
             profesores={profesores}
@@ -130,21 +133,25 @@ export default function ProfesoresPage() {
             />
           ) : (
             <div className="grid gap-3 max-w-3xl">
-              {profesores.map(p => (
-                <Card key={p.id} className="p-4 flex items-center justify-between">
-                  <div>
-                    <p className="font-medium text-ink-900">{p.nombre}</p>
-                    <p className="text-xs text-ink-400 mt-0.5">
-                      {(p.asignaciones || []).length} asignación(es)
-                      {p.diasNoTrabaja?.length > 0 && ` · No trabaja: ${p.diasNoTrabaja.map(d => DIAS_LABEL[d]).join(', ')}`}
-                    </p>
-                  </div>
-                  <div className="flex gap-2">
-                    <Button variant="secondary" onClick={() => empezarEdicion(p)}>Editar</Button>
-                    <Button variant="danger" onClick={() => eliminar(p.id)}>Eliminar</Button>
-                  </div>
-                </Card>
-              ))}
+              {profesores.map(p => {
+                const cantidadActividades = (p.asignaciones || []).filter(a => a.esActividad).length
+                return (
+                  <Card key={p.id} className="p-4 flex items-center justify-between">
+                    <div>
+                      <p className="font-medium text-ink-900">{p.nombre}</p>
+                      <p className="text-xs text-ink-400 mt-0.5">
+                        {(p.asignaciones || []).length} asignación(es)
+                        {cantidadActividades > 0 && ` (incl. ${cantidadActividades} actividad${cantidadActividades > 1 ? 'es' : ''})`}
+                        {p.diasNoTrabaja?.length > 0 && ` · No trabaja: ${p.diasNoTrabaja.map(d => DIAS_LABEL[d]).join(', ')}`}
+                      </p>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button variant="secondary" onClick={() => empezarEdicion(p)}>Editar</Button>
+                      <Button variant="danger" onClick={() => eliminar(p.id)}>Eliminar</Button>
+                    </div>
+                  </Card>
+                )
+              })}
             </div>
           )
         )}
@@ -153,7 +160,7 @@ export default function ProfesoresPage() {
   )
 }
 
-function FormularioProfesor({ form, setForm, grupos, materias, bloquesClase, mallas, profesores, editandoId, onGuardar, onCancelar, guardando, esNuevo }) {
+function FormularioProfesor({ form, setForm, grupos, materias, actividades, bloquesClase, mallas, profesores, editandoId, onGuardar, onCancelar, guardando, esNuevo }) {
   // Bloques nuevos que el usuario está armando y todavía no tienen ninguna
   // sección marcada (por eso no existen aún dentro de form.asignaciones).
   const [bloquesNuevos, setBloquesNuevos] = useState([])
@@ -192,15 +199,17 @@ function FormularioProfesor({ form, setForm, grupos, materias, bloquesClase, mal
     return fila ? Number(fila.leccionesPorSemana) : null
   }
 
-  // Agrupa las asignaciones del profesor en "bloques" visuales: cada bloque
-  // es una combinación única de materia+año, con la lista de secciones
-  // (grupoId) que tiene marcadas dentro de ese año. Por dentro, cada sección
-  // sigue siendo una entrada independiente en form.asignaciones — esto solo
-  // las junta para mostrarlas y editarlas de forma más compacta.
+  // Agrupa las asignaciones de MATERIA (no actividades) del profesor en
+  // "bloques" visuales: cada bloque es una combinación única de
+  // materia+año, con la lista de secciones (grupoId) que tiene marcadas
+  // dentro de ese año. Por dentro, cada sección sigue siendo una entrada
+  // independiente en form.asignaciones — esto solo las junta para
+  // mostrarlas y editarlas de forma más compacta.
   function agruparBloques() {
     const bloques = []
     const indice = {} // `${materiaId}|${anio}` -> índice en `bloques`
     form.asignaciones.forEach(a => {
+      if (a.esActividad) return
       const grupo = grupos.find(g => g.id === a.grupoId)
       if (!grupo) return
       const clave = `${a.materiaId}|${grupo.anio}`
@@ -218,19 +227,27 @@ function FormularioProfesor({ form, setForm, grupos, materias, bloquesClase, mal
   const bloquesExistentes = agruparBloques()
   const todosLosBloques = [...bloquesExistentes, ...bloquesNuevos]
 
-  // Reconstruye form.asignaciones a partir de los bloques (existentes + nuevos),
-  // aplicando las lecciones según la malla de cada año, y actualiza cuáles
-  // bloques siguen "vacíos" (sin secciones) para seguir mostrándolos editables.
+  // Las asignaciones de actividad se manejan aparte de los "bloques" de
+  // materia (no tienen sección que elegir, solo se marca cuáles
+  // actividades tiene el profesor a cargo).
+  const actividadesAsignadas = form.asignaciones.filter(a => a.esActividad)
+  const idsActividadesAsignadas = new Set(actividadesAsignadas.map(a => a.actividadId))
+
+  // Reconstruye form.asignaciones a partir de los bloques de materia
+  // (existentes + nuevos), aplicando las lecciones según la malla de cada
+  // año, y actualiza cuáles bloques siguen "vacíos" (sin secciones) para
+  // seguir mostrándolos editables. Las asignaciones de actividad se
+  // conservan tal cual, sin tocarlas.
   function aplicarBloques(bloquesActualizados) {
-    const nuevasAsignaciones = []
+    const nuevasAsignacionesMateria = []
     bloquesActualizados.forEach(bloque => {
       bloque.gruposIds.forEach(grupoId => {
         const sugeridas = leccionesSegunMalla(grupoId, bloque.materiaId)
-        nuevasAsignaciones.push({ grupoId, materiaId: bloque.materiaId, leccionesPorSemana: sugeridas ?? 0 })
+        nuevasAsignacionesMateria.push({ grupoId, materiaId: bloque.materiaId, leccionesPorSemana: sugeridas ?? 0 })
       })
     })
     setBloquesNuevos(bloquesActualizados.filter(b => b.gruposIds.length === 0))
-    setForm(f => ({ ...f, asignaciones: nuevasAsignaciones }))
+    setForm(f => ({ ...f, asignaciones: [...nuevasAsignacionesMateria, ...f.asignaciones.filter(a => a.esActividad)] }))
   }
 
   function agregarBloque() {
@@ -261,6 +278,35 @@ function FormularioProfesor({ form, setForm, grupos, materias, bloquesClase, mal
   function quitarBloque(indexBloque) {
     const actualizados = todosLosBloques.filter((_, i) => i !== indexBloque)
     aplicarBloques(actualizados)
+  }
+
+  // Marca/desmarca una actividad para este profesor. No pide cantidad de
+  // lecciones acá: esas se toman directo de la ficha de la actividad
+  // (igual que las materias toman las suyas de la malla), así que si la
+  // actividad cambia después en «Actividades», este profesor la sigue
+  // usando actualizada — no hay valor "congelado" que resincronizar acá
+  // (eso se hace en HorarioPage al generar, igual que con materias).
+  function toggleActividad(actividadId) {
+    setForm(f => {
+      const yaEsta = f.asignaciones.some(a => a.esActividad && a.actividadId === actividadId)
+      if (yaEsta) {
+        return { ...f, asignaciones: f.asignaciones.filter(a => !(a.esActividad && a.actividadId === actividadId)) }
+      }
+      const actividad = actividades.find(a => a.id === actividadId)
+      return {
+        ...f,
+        asignaciones: [
+          ...f.asignaciones,
+          {
+            esActividad: true,
+            actividadId,
+            leccionesPorSemana: Number(actividad?.leccionesPorSemana) || 0,
+            bloqueContinuo: !!actividad?.bloqueContinuo,
+            puedeAtravesarAlmuerzo: !!actividad?.puedeAtravesarAlmuerzo,
+          },
+        ],
+      }
+    })
   }
 
   return (
@@ -378,6 +424,29 @@ function FormularioProfesor({ form, setForm, grupos, materias, bloquesClase, mal
                   </div>
                 )
               })}
+            </div>
+          )}
+        </div>
+
+        <div>
+          <label className="block text-sm font-medium text-ink-700 mb-2">Actividades del colegio a cargo</label>
+          <p className="text-xs text-ink-400 mb-3">
+            Tareas que este profesor hace para el colegio (comités, coordinaciones, etc.), no clases. Durante esas lecciones queda ocupado, pero no se le ve a ningún grupo — solo en su propio horario. Las lecciones por semana se toman de la ficha de la actividad.
+          </p>
+          {actividades.length === 0 ? (
+            <p className="text-sm text-ink-400 italic">Todavía no hay actividades creadas — agregalas en «Actividades» primero.</p>
+          ) : (
+            <div className="flex flex-wrap gap-1.5">
+              {actividades.map(act => (
+                <Pill
+                  key={act.id}
+                  tone="clay"
+                  active={idsActividadesAsignadas.has(act.id)}
+                  onClick={() => toggleActividad(act.id)}
+                >
+                  {act.nombre} ({act.leccionesPorSemana} lecc./sem.)
+                </Pill>
+              ))}
             </div>
           )}
         </div>
