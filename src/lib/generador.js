@@ -302,18 +302,25 @@ function generarUnIntento({ profesores, dias, bloques, modoReparto, azar }) {
     for (const bloque of bloquesAOcupar) {
       ocupacionProfesor[kProf(unidad.profesorId, dia, bloque.id)] = true
       if (tieneGrupo) ocupacionGrupo[kGrupo(unidad.grupoId, dia, bloque.id)] = true
-      asignaciones.push({
+      // OJO: Firestore rechaza cualquier campo en `undefined` (setDoc
+      // lanza error). Por eso acá nunca se asignan claves con `|| undefined`
+      // ni `? x : undefined` — para una clase normal directamente no se
+      // incluyen `esActividad`/`actividadId`, en vez de incluirlas vacías.
+      const base = {
         profesorId: unidad.profesorId,
         profesorNombre: unidad.profesorNombre,
         grupoId: unidad.grupoId,
         materiaId: unidad.materiaId,
-        esActividad: unidad.esActividad || undefined,
-        actividadId: unidad.esActividad ? unidad.actividadId : undefined,
         dia,
         bloqueId: bloque.id,
         _unidadTipo: unidad.tipo,
         _unidadPuedeAtravesarAlmuerzo: !!unidad.puedeAtravesarAlmuerzo,
-      })
+      }
+      if (unidad.esActividad) {
+        base.esActividad = true
+        base.actividadId = unidad.actividadId
+      }
+      asignaciones.push(base)
     }
     if (tieneGrupo) {
       materiaGrupoDia[kMatDia(unidad.grupoId, unidad.materiaId, dia)] = true
@@ -434,15 +441,18 @@ function generarUnIntento({ profesores, dias, bloques, modoReparto, azar }) {
         doble: 'No se encontró un bloque doble (2 lecciones seguidas) libre sin choques.',
         suelta: 'No se encontró un bloque libre sin choques.',
       }
-      conflictos.push({
+      const conflicto = {
         profesorId: unidad.profesorId,
         profesorNombre: unidad.profesorNombre,
         grupoId: unidad.grupoId,
         materiaId: unidad.materiaId,
-        esActividad: unidad.esActividad || undefined,
-        actividadId: unidad.esActividad ? unidad.actividadId : undefined,
         motivo: motivoPorTipo[unidad.tipo] || 'No se encontró un bloque libre sin choques.',
-      })
+      }
+      if (unidad.esActividad) {
+        conflicto.esActividad = true
+        conflicto.actividadId = unidad.actividadId
+      }
+      conflictos.push(conflicto)
     }
   }
 
