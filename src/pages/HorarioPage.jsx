@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import {
-  listarProfesores, listarGrupos, listarMaterias, obtenerGrilla,
+  listarProfesores, listarGrupos, listarMaterias, listarActividades, obtenerGrilla,
   obtenerHorarioActual, guardarHorario, obtenerMallas, DIAS,
 } from '../lib/datos.js'
 import { generarHorario } from '../lib/generador.js'
@@ -15,6 +15,7 @@ export default function HorarioPage() {
   const [profesores, setProfesores] = useState([])
   const [grupos, setGrupos] = useState([])
   const [materias, setMaterias] = useState([])
+  const [actividades, setActividades] = useState([])
   const [bloques, setBloques] = useState([])
   const [mallas, setMallas] = useState({})
   const [horario, setHorario] = useState({ asignaciones: [], conflictos: [], avisos: [] })
@@ -25,12 +26,13 @@ export default function HorarioPage() {
   const [guardandoMovimiento, setGuardandoMovimiento] = useState(false)
 
   async function cargarTodo() {
-    const [profs, gr, mat, grilla, hor, malla] = await Promise.all([
-      listarProfesores(), listarGrupos(), listarMaterias(), obtenerGrilla(), obtenerHorarioActual(), obtenerMallas(),
+    const [profs, gr, mat, act, grilla, hor, malla] = await Promise.all([
+      listarProfesores(), listarGrupos(), listarMaterias(), listarActividades(), obtenerGrilla(), obtenerHorarioActual(), obtenerMallas(),
     ])
     setProfesores(profs)
     setGrupos(gr)
     setMaterias(mat)
+    setActividades(act)
     setBloques(grilla.bloques)
     setHorario(hor)
     setMallas(malla)
@@ -41,19 +43,40 @@ export default function HorarioPage() {
     cargarTodo().then(() => setCargando(false))
   }, [])
 
-  // Devuelve solo los profesores con asignaciones VÁLIDAS según la malla actual
-  // (la materia debe existir en la malla del año correspondiente al grupo), y
-  // además RESINCRONIZA leccionesPorSemana y bloqueContinuo tomándolos directo
-  // de la malla vigente — así, si la malla cambió después de guardar al
-  // profesor (más lecciones, o se activó "bloque continuo"), el generador
-  // siempre usa el valor más reciente, sin depender de lo que haya quedado
-  // grabado en la asignación del profesor.
+  // Devuelve solo los profesores con asignaciones VÁLIDAS, y resincroniza
+  // los valores que el generador necesita tomando siempre el dato más
+  // reciente de su fuente:
+  //   - Asignaciones de MATERIA: deben existir en la malla del año del
+  //     grupo correspondiente; se resincronizan leccionesPorSemana,
+  //     bloqueContinuo y puedeAtravesarAlmuerzo desde esa fila de malla.
+  //   - Asignaciones de ACTIVIDAD: deben existir todavía en la colección
+  //     de actividades (puede que se haya borrado); se resincronizan los
+  //     mismos campos desde la ficha de la actividad. No tienen grupo, así
+  //     que no se validan contra ninguna malla curricular.
   // También devuelve la lista de asignaciones descartadas, para avisar.
   function filtrarAsignacionesContraMalla(listaProfesores) {
     const descartadas = []
     const profesoresFiltrados = listaProfesores.map(prof => {
       const asignacionesValidas = (prof.asignaciones || [])
         .map(asig => {
+          if (asig.esActividad) {
+            const actividad = actividades.find(a => a.id === asig.actividadId)
+            if (!actividad) {
+              descartadas.push({
+                profesorNombre: prof.nombre,
+                grupoNombre: 'Actividad',
+                materiaId: null,
+                actividadNombre: null,
+              })
+              return null
+            }
+            return {
+              ...asig,
+              leccionesPorSemana: Number(actividad.leccionesPorSemana) || 0,
+              bloqueContinuo: !!actividad.bloqueContinuo,
+              puedeAtravesarAlmuerzo: !!actividad.puedeAtravesarAlmuerzo,
+            }
+          }
           const grupo = grupos.find(g => g.id === asig.grupoId)
           if (!grupo) return null
           const filasMalla = mallas[grupo.anio] || []
@@ -94,6 +117,8 @@ export default function HorarioPage() {
   // grupo": valida el movimiento con las mismas reglas duras del
   // generador y, si es válido, actualiza y guarda el horario; si no, deja
   // el horario intacto y muestra una alerta con el motivo exacto.
+  // (Las actividades nunca aparecen en esta vista, así que nunca llegan
+  // acá como origen ni como destino.)
   async function manejarSoltar(origen, destino) {
     const resultado = validarYAplicarMovimiento({
       origen,
@@ -116,15 +141,18 @@ export default function HorarioPage() {
   }
 
   const mapaMaterias = Object.fromEntries(materias.map(m => [m.id, m.nombre]))
+  const mapaActividades = Object.fromEntries(actividades.map(a => [a.id, a.nombre]))
   const mapaGrupos = Object.fromEntries(grupos.map(g => [g.id, g.nombre]))
   const mapaProfesores = Object.fromEntries(profesores.map(p => [p.id, p.nombre]))
 
   // Para cada profesor, la lista de nombres de materias que da (sin
   // repetir), derivada de sus asignaciones — se usa para mostrarlas junto
-  // al nombre en el selector de la vista "Por profesor".
+  // al nombre en el selector de la vista "Por profesor". Las actividades
+  // no cuentan como "materia" acá, para no confundir con lo que se le da
+  // a un grupo.
   const mapaMateriasPorProfesor = Object.fromEntries(
     profesores.map(p => {
-      const nombresUnicos = [...new Set((p.asignaciones || []).map(a => mapaMaterias[a.materiaId]).filter(Boolean))]
+      const nombresUnicos = [...new Set((p.asignaciones || []).filter(a => !a.esActividad).map(a => mapaMaterias[a.materiaId]).filter(Boolean))]
       return [p.id, nombresUnicos]
     })
   )
@@ -133,7 +161,10 @@ export default function HorarioPage() {
 
   // Compara, para cada grupo, lo que pide la malla de su año contra lo que
   // realmente quedó asignado a profesores (sumando todas las asignaciones de
-  // ese grupo+materia entre todos los profesores).
+  // ese grupo+materia entre todos los profesores). Las actividades no
+  // tienen grupo ni están en ninguna malla, así que nunca entran en este
+  // cálculo (la función ya solo suma por a.grupoId, que las actividades no
+  // tienen).
   const huecosMalla = calcularHuecosMalla({ profesores, grupos, mallas, mapaMaterias })
 
   if (cargando) return <Spinner />
@@ -176,7 +207,7 @@ export default function HorarioPage() {
             )}
 
             {horario.generadoEn && (
-              <ResumenGeneracion horario={horario} mapaProfesores={mapaProfesores} mapaGrupos={mapaGrupos} mapaMaterias={mapaMaterias} />
+              <ResumenGeneracion horario={horario} mapaProfesores={mapaProfesores} mapaGrupos={mapaGrupos} mapaMaterias={mapaMaterias} mapaActividades={mapaActividades} />
             )}
             {horario.avisos?.length > 0 && (
               <AvisoHuecosProfesor avisos={horario.avisos} />
@@ -217,6 +248,7 @@ export default function HorarioPage() {
                   modo={vista}
                   idSeleccionado={seleccionId}
                   mapaMaterias={mapaMaterias}
+                  mapaActividades={mapaActividades}
                   mapaGrupos={mapaGrupos}
                   mapaProfesores={mapaProfesores}
                   editable={vista === 'grupo' && !guardandoMovimiento}
@@ -244,27 +276,29 @@ function AvisoDescartadas({ descartadas, mapaMaterias }) {
   return (
     <div className="mb-4 px-4 py-3 rounded-md bg-clay-50 border border-clay-200 text-sm text-clay-800">
       <p className="font-medium mb-2">
-        {descartadas.length} asignación(es) se ignoraron porque ya no están en la malla curricular:
+        {descartadas.length} asignación(es) se ignoraron porque ya no son válidas:
       </p>
       <ul className="space-y-1 text-clay-700">
         {descartadas.map((d, i) => (
           <li key={i}>
-            · {d.profesorNombre} — {mapaMaterias[d.materiaId] || '—'} con {d.grupoNombre}
+            · {d.profesorNombre} — {d.grupoNombre === 'Actividad' ? 'una actividad que ya no existe' : `${mapaMaterias[d.materiaId] || '—'} con ${d.grupoNombre}`}
           </li>
         ))}
       </ul>
       <p className="mt-2 text-xs text-clay-600">
-        Si esto es un error, revisá la malla curricular de ese año o quitá/ajustá la asignación del profesor.
+        Si esto es un error, revisá la malla curricular de ese año, la lista de actividades, o quitá/ajustá la asignación del profesor.
       </p>
     </div>
   )
 }
 
 function calcularHuecosMalla({ profesores, grupos, mallas, mapaMaterias }) {
-  // total[grupoId][materiaId] = lecciones ya asignadas a algún profesor
+  // total[grupoId][materiaId] = lecciones ya asignadas a algún profesor.
+  // Las actividades no tienen grupoId, así que nunca entran acá.
   const totalAsignado = {}
   profesores.forEach(p => {
     (p.asignaciones || []).forEach(a => {
+      if (a.esActividad || !a.grupoId) return
       totalAsignado[a.grupoId] ??= {}
       totalAsignado[a.grupoId][a.materiaId] = (totalAsignado[a.grupoId][a.materiaId] || 0) + (Number(a.leccionesPorSemana) || 0)
     })
@@ -346,7 +380,7 @@ function AvisoHuecosProfesor({ avisos }) {
   )
 }
 
-function ResumenGeneracion({ horario, mapaProfesores, mapaGrupos, mapaMaterias }) {
+function ResumenGeneracion({ horario, mapaProfesores, mapaGrupos, mapaMaterias, mapaActividades }) {
   const hayConflictos = horario.conflictos?.length > 0
   return (
     <div className={`mb-6 px-4 py-3 rounded-md border text-sm ${hayConflictos ? 'bg-clay-50 border-clay-200 text-clay-800' : 'bg-sage-50 border-sage-200 text-sage-800'}`}>
@@ -357,7 +391,7 @@ function ResumenGeneracion({ horario, mapaProfesores, mapaGrupos, mapaMaterias }
             {horario.conflictos.map((c, i) => (
               <li key={i}>
                 {c.profesorId
-                  ? `· ${mapaProfesores[c.profesorId] || '—'} — ${mapaMaterias[c.materiaId] || '—'} con ${mapaGrupos[c.grupoId] || '—'}`
+                  ? `· ${mapaProfesores[c.profesorId] || '—'} — ${c.esActividad ? (mapaActividades[c.actividadId] || 'Actividad') : (mapaMaterias[c.materiaId] || '—')}${c.grupoId ? ` con ${mapaGrupos[c.grupoId] || '—'}` : ''}`
                   : `· ${mapaGrupos[c.grupoId] || c.grupoId} — ${c.motivo}`}
               </li>
             ))}
@@ -370,7 +404,7 @@ function ResumenGeneracion({ horario, mapaProfesores, mapaGrupos, mapaMaterias }
   )
 }
 
-function TablaHorario({ bloques, asignaciones, modo, idSeleccionado, mapaMaterias, mapaGrupos, mapaProfesores, editable, onSoltar }) {
+function TablaHorario({ bloques, asignaciones, modo, idSeleccionado, mapaMaterias, mapaActividades, mapaGrupos, mapaProfesores, editable, onSoltar }) {
   const [arrastrando, setArrastrando] = useState(null) // la asignación que se está arrastrando
   const [sobreCelda, setSobreCelda] = useState(null) // `${dia}|${bloqueId}` sobre la que está pasando el arrastre
 
@@ -434,6 +468,7 @@ function TablaHorario({ bloques, asignaciones, modo, idSeleccionado, mapaMateria
                   const a = celda(dia, b.id)
                   const claveCelda = `${dia}|${b.id}`
                   const esDestinoActivo = editable && arrastrando && sobreCelda === claveCelda
+                  const esActividad = a?.esActividad
                   return (
                     <td
                       key={dia}
@@ -444,14 +479,16 @@ function TablaHorario({ bloques, asignaciones, modo, idSeleccionado, mapaMateria
                     >
                       {a ? (
                         <div
-                          draggable={editable}
+                          draggable={editable && !esActividad}
                           onDragStart={() => manejarDragStart(a)}
                           onDragEnd={() => { setArrastrando(null); setSobreCelda(null) }}
-                          className={editable ? 'cursor-grab active:cursor-grabbing rounded-md px-1.5 py-1 -mx-1.5 -my-1 hover:bg-ink-50 transition-colors' : ''}
+                          className={editable && !esActividad ? 'cursor-grab active:cursor-grabbing rounded-md px-1.5 py-1 -mx-1.5 -my-1 hover:bg-ink-50 transition-colors' : ''}
                         >
-                          <p className="font-medium text-ink-900">{mapaMaterias[a.materiaId]}</p>
+                          <p className={`font-medium ${esActividad ? 'text-clay-700 italic' : 'text-ink-900'}`}>
+                            {esActividad ? (mapaActividades[a.actividadId] || 'Actividad') : mapaMaterias[a.materiaId]}
+                          </p>
                           <p className="text-xs text-ink-400">
-                            {modo === 'profesor' ? mapaGrupos[a.grupoId] : mapaProfesores[a.profesorId]}
+                            {modo === 'profesor' ? (esActividad ? 'Actividad del colegio' : mapaGrupos[a.grupoId]) : mapaProfesores[a.profesorId]}
                           </p>
                         </div>
                       ) : (
