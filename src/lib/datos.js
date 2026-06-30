@@ -62,6 +62,30 @@ export async function eliminarMateria(id) {
   return deleteDoc(doc(db, 'materias', id))
 }
 
+// ---------- ACTIVIDADES ----------
+// Tareas que un profesor hace para el colegio (no son clase a ningún
+// grupo): comités, coordinaciones, etc. Durante esas lecciones el
+// profesor queda ocupado igual que si estuviera dando clase, pero la
+// actividad nunca aparece en el horario de ningún grupo/sección — solo
+// en el horario "Por profesor".
+// { nombre, leccionesPorSemana, bloqueContinuo: bool, puedeAtravesarAlmuerzo: bool }
+export async function listarActividades() {
+  const snap = await getDocs(query(collection(db, 'actividades'), orderBy('nombre')))
+  return snap.docs.map(d => ({ id: d.id, ...d.data() }))
+}
+
+export async function crearActividad(actividad) {
+  return addDoc(collection(db, 'actividades'), actividad)
+}
+
+export async function actualizarActividad(id, datos) {
+  return updateDoc(doc(db, 'actividades', id), datos)
+}
+
+export async function eliminarActividad(id) {
+  return deleteDoc(doc(db, 'actividades', id))
+}
+
 // ---------- GRUPOS ----------
 // { nombre: '9-2', anio: '9', seccion: '2' }
 export async function listarGrupos() {
@@ -103,7 +127,8 @@ export async function guardarMalla(anio, materiasDelAnio) {
 //   bloquesPreferidos: ['b1','b2'],   // ids de bloque preferidos
 //   bloquesEvitados: ['b11','b12'],   // ids de bloque a evitar
 //   asignaciones: [
-//     { grupoId, materiaId, leccionesPorSemana: 4 }
+//     { grupoId, materiaId, leccionesPorSemana: 4 },              // clase normal
+//     { esActividad: true, actividadId, leccionesPorSemana: 2 },  // actividad (sin grupo)
 //   ]
 // }
 export async function listarProfesores() {
