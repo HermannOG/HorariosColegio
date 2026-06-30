@@ -5,6 +5,7 @@ import {
 } from '../lib/datos.js'
 import { generarHorario } from '../lib/generador.js'
 import { validarYAplicarMovimiento } from '../lib/validarMovimiento.js'
+import { generarDocxHorario, descargarBlob, nombreArchivoSeguro } from '../lib/exportarHorarioWord.js'
 import { PageHeader, Button, Card, Select, Spinner, EmptyState, Pill } from '../components/ui.jsx'
 
 const DIAS_LABEL = { lunes: 'Lunes', martes: 'Martes', miercoles: 'Miércoles', jueves: 'Jueves', viernes: 'Viernes' }
@@ -24,6 +25,7 @@ export default function HorarioPage() {
   const [modoReparto, setModoReparto] = useState('parejo') // 'parejo' | 'temprano'
   const [alertaMovimiento, setAlertaMovimiento] = useState(null)
   const [guardandoMovimiento, setGuardandoMovimiento] = useState(false)
+  const [descargando, setDescargando] = useState(false)
 
   async function cargarTodo() {
     const [profs, gr, mat, act, grilla, hor, malla] = await Promise.all([
@@ -157,6 +159,40 @@ export default function HorarioPage() {
     })
   )
 
+  // Genera el .docx del horario actualmente seleccionado (profesor o
+  // grupo, según `vista`) con exactamente los mismos datos que se ven en
+  // pantalla, y dispara la descarga en el navegador.
+  async function descargarWord() {
+    if (!seleccionId || !horario.generadoEn) return
+    setDescargando(true)
+    try {
+      const esProfesor = vista === 'profesor'
+      const nombreSeleccion = esProfesor ? (mapaProfesores[seleccionId] || '') : (mapaGrupos[seleccionId] || '')
+      const materiasDelProfe = esProfesor ? (mapaMateriasPorProfesor[seleccionId] || []) : []
+      const titulo = esProfesor && materiasDelProfe.length > 0
+        ? `${nombreSeleccion} — ${materiasDelProfe.join(', ')}`
+        : nombreSeleccion
+
+      const blob = await generarDocxHorario({
+        modo: vista,
+        idSeleccionado: seleccionId,
+        titulo,
+        bloques,
+        asignaciones: horario.asignaciones,
+        mapaMaterias,
+        mapaActividades,
+        mapaGrupos,
+        mapaProfesores,
+      })
+
+      const prefijo = esProfesor ? 'horario_profesor' : 'horario_grupo'
+      descargarBlob(blob, `${prefijo}_${nombreArchivoSeguro(nombreSeleccion)}.docx`)
+    } finally {
+      setDescargando(false)
+    }
+  }
+
+
   const listaSeleccion = vista === 'profesor' ? profesores : grupos
 
   // Compara, para cada grupo, lo que pide la malla de su año contra lo que
@@ -231,6 +267,11 @@ export default function HorarioPage() {
                       <option key={item.id} value={item.id}>{item.nombre}</option>
                     ))}
               </Select>
+              {horario.generadoEn && seleccionId && (
+                <Button variant="secondary" onClick={descargarWord} disabled={descargando}>
+                  {descargando ? 'Generando Word…' : '⬇ Descargar Word'}
+                </Button>
+              )}
             </div>
 
             {!horario.generadoEn ? (
