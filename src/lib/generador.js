@@ -58,6 +58,15 @@
 //    ayuda no se termina usando (el camino que la motivó se descarta más
 //    adelante), se revierte por completo — nunca queda un cambio a medio
 //    aplicar ni se empeora un grupo que ya estaba bien.
+// 8. ACTIVIDADES (no son clase a ningún grupo): un profesor puede tener
+//    asignaciones de tipo "actividad" (comités, coordinaciones, etc.)
+//    marcadas con `esActividad: true` y sin `grupoId`. Ocupan al
+//    profesor igual que una clase normal (no puede dar clase mientras
+//    hace la actividad), pero NUNCA ocupan a ningún grupo, nunca entran
+//    en la regla de "no repetir esa materia/actividad el mismo día"
+//    (una actividad sí puede repetirse el mismo día), y nunca participan
+//    de la compactación de huecos de grupo ni de la malla curricular —
+//    solo se ven en el horario "Por profesor".
 // ========================================================================
 
 function construirUnidades(profesores) {
@@ -68,11 +77,17 @@ function construirUnidades(profesores) {
       const cantidad = Number(asig.leccionesPorSemana) || 0
       if (cantidad <= 0) continue
 
+      const esActividad = !!asig.esActividad
+
       const base = {
         profesorId: prof.id,
         profesorNombre: prof.nombre,
-        grupoId: asig.grupoId,
-        materiaId: asig.materiaId,
+        // Las actividades no tienen grupo: se deja sin definir (no se usa
+        // en ningún choque de grupo ni de "repetir materia el mismo día").
+        grupoId: esActividad ? null : asig.grupoId,
+        materiaId: esActividad ? null : asig.materiaId,
+        esActividad,
+        actividadId: esActividad ? asig.actividadId : null,
         diasNoTrabaja: prof.diasNoTrabaja || [],
         bloquesPreferidos: prof.bloquesPreferidos || [],
         bloquesEvitados: prof.bloquesEvitados || [],
@@ -239,12 +254,14 @@ function generarUnIntento({ profesores, dias, bloques, modoReparto, azar }) {
   // todavía no llegan la posibilidad de alcanzarlo.
   //
   // `leccionesPendientesPorGrupo` arranca en el total de lecciones de cada
-  // grupo (suma de leccionesPorSemana de todas sus asignaciones) y baja a
+  // grupo (suma de leccionesPorSemana de todas sus asignaciones de CLASE —
+  // las actividades no tienen grupo, así que nunca suman aquí) y baja a
   // medida que se van colocando unidades.
   const leccionesPendientesPorGrupo = {}
   if (minimoLeccionesPorDia > 0) {
     for (const prof of profesores) {
       for (const asig of (prof.asignaciones || [])) {
+        if (asig.esActividad || !asig.grupoId) continue
         const cantidad = Number(asig.leccionesPorSemana) || 0
         leccionesPendientesPorGrupo[asig.grupoId] = (leccionesPendientesPorGrupo[asig.grupoId] || 0) + cantidad
       }
@@ -281,25 +298,30 @@ function generarUnIntento({ profesores, dias, bloques, modoReparto, azar }) {
   function kCargaDia(grupoId, dia) { return `${grupoId}|${dia}` }
 
   function colocar(unidad, dia, bloquesAOcupar) {
+    const tieneGrupo = !unidad.esActividad && !!unidad.grupoId
     for (const bloque of bloquesAOcupar) {
       ocupacionProfesor[kProf(unidad.profesorId, dia, bloque.id)] = true
-      ocupacionGrupo[kGrupo(unidad.grupoId, dia, bloque.id)] = true
+      if (tieneGrupo) ocupacionGrupo[kGrupo(unidad.grupoId, dia, bloque.id)] = true
       asignaciones.push({
         profesorId: unidad.profesorId,
         profesorNombre: unidad.profesorNombre,
         grupoId: unidad.grupoId,
         materiaId: unidad.materiaId,
+        esActividad: unidad.esActividad || undefined,
+        actividadId: unidad.esActividad ? unidad.actividadId : undefined,
         dia,
         bloqueId: bloque.id,
         _unidadTipo: unidad.tipo,
         _unidadPuedeAtravesarAlmuerzo: !!unidad.puedeAtravesarAlmuerzo,
       })
     }
-    materiaGrupoDia[kMatDia(unidad.grupoId, unidad.materiaId, dia)] = true
-    const k = kCargaDia(unidad.grupoId, dia)
-    leccionesPorDiaGrupo[k] = (leccionesPorDiaGrupo[k] || 0) + bloquesAOcupar.length
-    if (minimoLeccionesPorDia > 0 && unidad.grupoId in leccionesPendientesPorGrupo) {
-      leccionesPendientesPorGrupo[unidad.grupoId] -= bloquesAOcupar.length
+    if (tieneGrupo) {
+      materiaGrupoDia[kMatDia(unidad.grupoId, unidad.materiaId, dia)] = true
+      const k = kCargaDia(unidad.grupoId, dia)
+      leccionesPorDiaGrupo[k] = (leccionesPorDiaGrupo[k] || 0) + bloquesAOcupar.length
+      if (minimoLeccionesPorDia > 0 && unidad.grupoId in leccionesPendientesPorGrupo) {
+        leccionesPendientesPorGrupo[unidad.grupoId] -= bloquesAOcupar.length
+      }
     }
   }
 
@@ -320,28 +342,33 @@ function generarUnIntento({ profesores, dias, bloques, modoReparto, azar }) {
   // (la regla dura de "nunca se sale antes del almuerzo" se resuelve de
   // forma definitiva en la fase de compactación; acá solo evitamos que
   // el desempate por puntaje empuje activamente en la dirección
-  // contraria a esa regla).
+  // contraria a esa regla). Para unidades de actividad (sin grupo), no
+  // hay carga de grupo que repartir ni concentrar — el desempate de
+  // reparto simplemente no aplica.
   function opcionesParaUnidad(unidad) {
     const diasDisponibles = dias.filter(d => !unidad.diasNoTrabaja.includes(d))
     const esContinua = unidad.tipo === 'continua'
     const tramos = tramosDeTamano(unidad.cantidadBloques, esContinua, esContinua && unidad.puedeAtravesarAlmuerzo)
+    const tieneGrupo = !unidad.esActividad && !!unidad.grupoId
     const opciones = []
     for (const dia of diasDisponibles) {
       for (const tramo of tramos) {
         let puntaje = tramo.reduce((acc, b) => acc + puntajeBloque(unidad, b), 0)
-        const carga = leccionesPorDiaGrupo[kCargaDia(unidad.grupoId, dia)] || 0
-        if (modoReparto === 'parejo') {
-          puntaje -= carga // preferir días con MENOS carga acumulada -> reparte parejo
-        } else if (modoReparto === 'temprano') {
-          // Preferir días con MÁS carga acumulada (concentra), pero solo
-          // mientras ese día ya vaya camino a alcanzar el mínimo exigido.
-          // Si un día todavía no llega al mínimo, no tiene sentido
-          // "premiarlo" más que a otro: hay que seguir completándolo
-          // igual que en modo parejo, para no terminar saliendo temprano.
-          if (minimoLeccionesPorDia > 0 && carga < minimoLeccionesPorDia) {
-            puntaje -= carga // mismo criterio que 'parejo' hasta llegar al mínimo
-          } else {
-            puntaje += carga // ya alcanzó el mínimo: ahora sí se puede concentrar
+        if (tieneGrupo) {
+          const carga = leccionesPorDiaGrupo[kCargaDia(unidad.grupoId, dia)] || 0
+          if (modoReparto === 'parejo') {
+            puntaje -= carga // preferir días con MENOS carga acumulada -> reparte parejo
+          } else if (modoReparto === 'temprano') {
+            // Preferir días con MÁS carga acumulada (concentra), pero solo
+            // mientras ese día ya vaya camino a alcanzar el mínimo exigido.
+            // Si un día todavía no llega al mínimo, no tiene sentido
+            // "premiarlo" más que a otro: hay que seguir completándolo
+            // igual que en modo parejo, para no terminar saliendo temprano.
+            if (minimoLeccionesPorDia > 0 && carga < minimoLeccionesPorDia) {
+              puntaje -= carga // mismo criterio que 'parejo' hasta llegar al mínimo
+            } else {
+              puntaje += carga // ya alcanzó el mínimo: ahora sí se puede concentrar
+            }
           }
         }
         opciones.push({ dia, bloques: tramo, puntaje, _azar: azar() })
@@ -352,10 +379,16 @@ function generarUnIntento({ profesores, dias, bloques, modoReparto, azar }) {
   }
 
   function cabeSinChoque(unidad, dia, bloquesAOcupar, permitirRepetirMateriaDia, respetarTopeConcentracion) {
+    const tieneGrupo = !unidad.esActividad && !!unidad.grupoId
     for (const bloque of bloquesAOcupar) {
       if (ocupacionProfesor[kProf(unidad.profesorId, dia, bloque.id)]) return false
-      if (ocupacionGrupo[kGrupo(unidad.grupoId, dia, bloque.id)]) return false
+      if (tieneGrupo && ocupacionGrupo[kGrupo(unidad.grupoId, dia, bloque.id)]) return false
     }
+    // Las actividades nunca chocan con un grupo (no tienen) y pueden
+    // repetirse el mismo día sin restricción — por eso se saltan por
+    // completo el chequeo de "misma materia/grupo el mismo día" y el
+    // tope de concentración (ese tope solo tiene sentido para grupos).
+    if (!tieneGrupo) return true
     if (!permitirRepetirMateriaDia && materiaGrupoDia[kMatDia(unidad.grupoId, unidad.materiaId, dia)]) return false
     if (respetarTopeConcentracion && !esSeguroConcentrarEnEsteDia(unidad.grupoId, dia, bloquesAOcupar.length)) return false
     return true
@@ -379,6 +412,9 @@ function generarUnIntento({ profesores, dias, bloques, modoReparto, azar }) {
     //      modo sería válida. Si esto ocurre, puede que algún día quede
     //      corto de margen — eso se detecta y reporta en la fase de
     //      compactación (salidaTemprana), no se pierde de vista.
+    // (Para unidades de actividad, las tres pasadas dan exactamente el
+    // mismo resultado, porque `cabeSinChoque` ya las deja pasar de una vez
+    // — no hay necesidad de un caso especial aquí.)
     for (const [permitirRepetir, respetarTope] of [[false, true], [true, true], [true, false]]) {
       for (const { dia, bloques: bloquesOpcion } of opciones) {
         if (cabeSinChoque(unidad, dia, bloquesOpcion, permitirRepetir, respetarTope)) {
@@ -403,6 +439,8 @@ function generarUnIntento({ profesores, dias, bloques, modoReparto, azar }) {
         profesorNombre: unidad.profesorNombre,
         grupoId: unidad.grupoId,
         materiaId: unidad.materiaId,
+        esActividad: unidad.esActividad || undefined,
+        actividadId: unidad.esActividad ? unidad.actividadId : undefined,
         motivo: motivoPorTipo[unidad.tipo] || 'No se encontró un bloque libre sin choques.',
       })
     }
@@ -427,8 +465,13 @@ function generarUnIntento({ profesores, dias, bloques, modoReparto, azar }) {
   // simplemente no tiene suficientes lecciones ese día para alcanzar el
   // mínimo exigido, el hueco al final del día tampoco se puede cerrar —
   // se reporta como conflicto explicado en vez de dejarlo pasar en silencio.
+  //
+  // Las actividades nunca participan de esta fase: no tienen grupo, así
+  // que ni `grupos` (la lista de ids reales) las incluye ni `asignaciones`
+  // filtradas por grupoId las captura.
+  const gruposReales = [...new Set(unidades.map(u => u.grupoId).filter(Boolean))]
   const huecosNoReparables = compactarHuecos({
-    bloques, bloquesClase, dias, grupos: [...new Set(unidades.map(u => u.grupoId))],
+    bloques, bloquesClase, dias, grupos: gruposReales,
     asignaciones, ocupacionProfesor, ocupacionGrupo, minimoLeccionesPorDia,
   })
   for (const h of huecosNoReparables) {
@@ -450,9 +493,14 @@ function generarUnIntento({ profesores, dias, bloques, modoReparto, azar }) {
   // romper la compactación de un grupo para lograrse). Se reporta en una
   // lista separada de "avisos", no como conflicto duro, porque no bloquea
   // que el horario se considere "completo" — es una mejora deseable, no
-  // un requisito indispensable.
+  // un requisito indispensable. Las lecciones de actividad SÍ cuentan para
+  // saber si el profesor tiene un hueco entre dos compromisos suyos (están
+  // en `asignaciones` con su propio bloqueId, ocupan `ocupacionProfesor`
+  // igual que una clase), pero, al no tener `grupoId`, nunca se eligen
+  // como "candidata a mover" hacia el hueco de otro profesor en esta fase
+  // (esa función filtra por `ocupacionGrupo`, que las actividades no usan).
   const avisosHuecosProfesor = compactarHuecosProfesores({
-    bloques, bloquesClase, dias, profesores, grupos: [...new Set(unidades.map(u => u.grupoId))],
+    bloques, bloquesClase, dias, profesores, grupos: gruposReales,
     asignaciones, ocupacionProfesor, ocupacionGrupo, minimoLeccionesPorDia,
   })
   const avisos = avisosHuecosProfesor.map(a => ({
@@ -579,6 +627,15 @@ export function generarHorario({ profesores, dias, bloques, modoReparto = 'parej
 // otra posición; no hay motivo para revertirlo después. Si la ayuda
 // falla, se descarta sin tocar nada y se sigue probando como si esa
 // opción no hubiera existido — el grupo ayudante nunca queda peor.
+//
+// Nota sobre actividades: como nunca ocupan `ocupacionGrupo` ni entran en
+// `asignaciones.filter(a => a.grupoId === grupoId)` con un `grupoId` real
+// (el suyo es null/undefined), son completamente invisibles para esta
+// fase — ni se compactan como si fueran de un grupo, ni pueden ser
+// "candidatas" para ayudar a cerrar el hueco de un grupo real. Esto es
+// intencional: si se moviera una actividad para tapar un hueco, dejaría
+// de cumplir su propósito de marcar al profesor como ocupado en un
+// horario predecible para ese fin.
 // ========================================================================
 
 function compactarHuecos({ bloques, bloquesClase, dias, grupos, asignaciones, ocupacionProfesor, ocupacionGrupo, minimoLeccionesPorDia = 0 }) {
@@ -657,6 +714,10 @@ function compactarHuecos({ bloques, bloquesClase, dias, grupos, asignaciones, oc
   // profesor está ocupado en OTRO grupo a esa hora, antes de descartar esa
   // opción se intenta `pedirAyuda` para liberar ese bloque en el otro
   // grupo. Devuelve `true`/`false` igual que antes.
+  //
+  // Si el bloqueo lo causa una ACTIVIDAD del profesor (no otro grupo), no
+  // tiene sentido pedir ayuda — la actividad no se puede mover desde acá
+  // (no tiene grupo dueño); simplemente esa opción no es viable.
   function compactarGrupoDia(grupoId, dia, asignacionesDelDia, objetivoEfectivo) {
     const unidadesMoviles = agruparEnUnidadesMoviles(asignacionesDelDia)
     const idsObjetivoEfectivo = objetivoEfectivo.map(b => b.id)
@@ -857,6 +918,10 @@ function compactarHuecos({ bloques, bloquesClase, dias, grupos, asignaciones, oc
               const clave = kProf(unidad.profesorId, dia, bloque.id)
               if (!ocupacionProfesor[clave]) continue
               const otroGrupo = encontrarGrupoOcupante(unidad.profesorId, dia, bloque.id)
+              // Si el bloqueo no pertenece a ningún grupo real (por
+              // ejemplo, es una actividad del profesor, que no tiene
+              // grupoId), no hay a quién pedirle ayuda: esa opción no es
+              // viable, igual que si chocara contra el propio grupo.
               if (!otroGrupo || otroGrupo === grupoId) { viable = false; break }
               const resultadoAyuda = pedirAyuda(otroGrupo, bloque.id, unidad.profesorId, PROFUNDIDAD_MAXIMA_AYUDA)
               if (!resultadoAyuda) { viable = false; break }
@@ -993,6 +1058,16 @@ function compactarHuecos({ bloques, bloquesClase, dias, grupos, asignaciones, oc
 // regla de grupo manda siempre. El mecanismo es el mismo principio de
 // "ayuda reversible" ya usado para los huecos entre grupos: cada intento
 // se puede deshacer por completo si no resulta en una mejora real.
+//
+// Las lecciones de actividad cuentan como "ocupado" para el profesor (ver
+// `indicesOcupados` más abajo, que mira `asignaciones` sin filtrar por
+// grupo) — así que un hueco entre una clase y una actividad, o entre dos
+// actividades, también se detecta e intenta cerrar igual que cualquier
+// otro. Lo que nunca ocurre es que una actividad sea elegida como
+// "candidata a mover" (esa lista se restringe a candidatas con grupoId,
+// ver `candidatasDelDia` más abajo), porque mover una actividad le haría
+// perder su propósito de ocupar al profesor en un horario fijo y
+// predecible.
 // ========================================================================
 
 function compactarHuecosProfesores({ bloques, bloquesClase, dias, profesores, grupos, asignaciones, ocupacionProfesor, ocupacionGrupo, minimoLeccionesPorDia = 0 }) {
@@ -1075,8 +1150,12 @@ function compactarHuecosProfesores({ bloques, bloquesClase, dias, profesores, gr
         // tamaño 1 (lección suelta) — esta fase solo reubica lecciones
         // individuales, nunca separa un bloque doble o continuo (mover una
         // sola lección de una unidad de 2+ bloques rompería esa unidad,
-        // lo cual no es válido).
-        const candidatasDelDia = asignaciones.filter(a => a.profesorId === profesor.id && a.dia === dia && a.bloqueId !== bloqueHueco.id)
+        // lo cual no es válido). Se excluyen las actividades (sin
+        // grupoId): no tiene sentido moverlas, porque no pertenecen a
+        // ningún grupo cuya compactación haya que preservar, y mover una
+        // le haría perder su propósito de marcar al profesor ocupado en
+        // un horario fijo.
+        const candidatasDelDia = asignaciones.filter(a => a.profesorId === profesor.id && a.dia === dia && a.bloqueId !== bloqueHueco.id && a.grupoId)
 
         let resuelto = false
         for (const candidata of candidatasDelDia) {
