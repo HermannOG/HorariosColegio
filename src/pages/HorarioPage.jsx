@@ -209,9 +209,9 @@ export default function HorarioPage() {
             {horario.generadoEn && (
               <ResumenGeneracion horario={horario} mapaProfesores={mapaProfesores} mapaGrupos={mapaGrupos} mapaMaterias={mapaMaterias} mapaActividades={mapaActividades} />
             )}
-            {horario.avisos?.length > 0 && (
-              <AvisoHuecosProfesor avisos={horario.avisos} />
-            )}
+            {/* Aviso de huecos de profesor oculto a pedido — el generador
+                sigue calculando horario.avisos por si se quiere mostrar
+                de nuevo más adelante, solo se dejó de renderizar acá. */}
 
             <div className="flex items-center gap-3 mb-5 mt-2">
               <div className="flex gap-1.5">
