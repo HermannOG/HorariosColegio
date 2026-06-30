@@ -3,6 +3,7 @@
 // ------------------------------------------------------------------------
 // Genera un documento Word con la grilla del horario tal como se ve en
 // pantalla (por profesor o por grupo), usando la librería `docx` (corre
+
 // en el navegador, sin necesidad de backend). El documento se arma con
 // exactamente los mismos datos que ya están cargados en HorarioPage —
 // no se vuelve a consultar Firestore acá.
