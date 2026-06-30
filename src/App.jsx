@@ -3,6 +3,7 @@ import InicioPage from './pages/InicioPage.jsx'
 import ProfesoresPage from './pages/ProfesoresPage.jsx'
 import GruposPage from './pages/GruposPage.jsx'
 import MateriasPage from './pages/MateriasPage.jsx'
+import ActividadesPage from './pages/ActividadesPage.jsx'
 import MallaPage from './pages/MallaPage.jsx'
 import GrillaPage from './pages/GrillaPage.jsx'
 import HorarioPage from './pages/HorarioPage.jsx'
@@ -11,6 +12,7 @@ const navItems = [
   { to: '/', label: 'Inicio', icon: IconHome },
   { to: '/grilla', label: 'Grilla del día', icon: IconClock },
   { to: '/materias', label: 'Materias', icon: IconBook },
+  { to: '/actividades', label: 'Actividades', icon: IconClipboard },
   { to: '/grupos', label: 'Grupos', icon: IconUsers },
   { to: '/malla', label: 'Malla curricular', icon: IconLayers },
   { to: '/profesores', label: 'Profesores', icon: IconPerson },
@@ -55,6 +57,7 @@ export default function App() {
             <Route path="/" element={<InicioPage />} />
             <Route path="/grilla" element={<GrillaPage />} />
             <Route path="/materias" element={<MateriasPage />} />
+            <Route path="/actividades" element={<ActividadesPage />} />
             <Route path="/malla" element={<MallaPage />} />
             <Route path="/grupos" element={<GruposPage />} />
             <Route path="/profesores" element={<ProfesoresPage />} />
@@ -87,6 +90,15 @@ function IconBook(props) {
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" {...props}>
       <path d="M4 5.5C4 4.7 4.7 4 5.5 4H12v16H5.5A1.5 1.5 0 0 1 4 18.5v-13Z" />
       <path d="M20 5.5c0-.8-.7-1.5-1.5-1.5H12v16h6.5a1.5 1.5 0 0 0 1.5-1.5v-13Z" />
+    </svg>
+  )
+}
+function IconClipboard(props) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" {...props}>
+      <rect x="5.5" y="4.5" width="13" height="16" rx="1.5" />
+      <path d="M9 4.5V3.5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v1" strokeLinecap="round" />
+      <path d="M8.5 10.5h7M8.5 14h7M8.5 17.5h4.5" strokeLinecap="round" />
     </svg>
   )
 }
