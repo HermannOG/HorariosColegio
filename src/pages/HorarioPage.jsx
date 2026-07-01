@@ -23,6 +23,7 @@ export default function HorarioPage() {
   const [vista, setVista] = useState('profesor') // 'profesor' | 'grupo'
   const [seleccionId, setSeleccionId] = useState('')
   const [modoReparto, setModoReparto] = useState('parejo') // 'parejo' | 'temprano'
+  const [modoHuecosProfesor, setModoHuecosProfesor] = useState('normal') // 'normal' | 'estricto'
   const [alertaMovimiento, setAlertaMovimiento] = useState(null)
   const [guardandoMovimiento, setGuardandoMovimiento] = useState(false)
   const [descargando, setDescargando] = useState(false)
@@ -108,7 +109,7 @@ export default function HorarioPage() {
     setGenerando(true)
     const grilla = await obtenerGrilla()
     const { profesoresFiltrados, descartadas } = filtrarAsignacionesContraMalla(profesores)
-    const resultado = generarHorario({ profesores: profesoresFiltrados, dias: DIAS, bloques: grilla.bloques, modoReparto })
+    const resultado = generarHorario({ profesores: profesoresFiltrados, dias: DIAS, bloques: grilla.bloques, modoReparto, modoHuecosProfesor })
     resultado.asignacionesDescartadas = descartadas
     await guardarHorario(resultado)
     setHorario(resultado)
@@ -217,6 +218,13 @@ export default function HorarioPage() {
               <div className="flex gap-1.5">
                 <Pill tone="ink" active={modoReparto === 'parejo'} onClick={() => setModoReparto('parejo')}>Parejo entre días</Pill>
                 <Pill tone="ink" active={modoReparto === 'temprano'} onClick={() => setModoReparto('temprano')}>Salir temprano</Pill>
+              </div>
+            </div>
+            <div className="text-right">
+              <p className="text-xs text-ink-400 mb-1">Huecos en el horario de un profesor</p>
+              <div className="flex gap-1.5">
+                <Pill tone="ink" active={modoHuecosProfesor === 'normal'} onClick={() => setModoHuecosProfesor('normal')}>Como están ahora</Pill>
+                <Pill tone="ink" active={modoHuecosProfesor === 'estricto'} onClick={() => setModoHuecosProfesor('estricto')}>Evitar huecos</Pill>
               </div>
             </div>
             <Button onClick={generar} disabled={generando || profesores.length === 0}>
