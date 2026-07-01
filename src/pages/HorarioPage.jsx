@@ -268,7 +268,7 @@ export default function HorarioPage() {
                     ))}
               </Select>
               {horario.generadoEn && seleccionId && (
-                <Button variant="secondary" onClick={descargarWord} disabled={descargando}>
+                <Button variant="secondary" onClick={descargarWord} disabled={descargando} className="ml-auto">
                   {descargando ? 'Generando Word…' : '⬇ Descargar Word'}
                 </Button>
               )}
