@@ -191,7 +191,7 @@ function calcularDisponibilidad(unidad, dias, bloquesClase) {
   return diasDisponibles.length * bloquesClase.length
 }
 
-function generarUnIntento({ profesores, dias, bloques, modoReparto, azar }) {
+function generarUnIntento({ profesores, dias, bloques, modoReparto, modoHuecosProfesor = 'normal', azar }) {
   const bloquesClase = bloques.filter(b => b.tipo === 'clase')
 
   // Posición (dentro de bloquesClase, no de bloques) del último bloque de
@@ -512,6 +512,7 @@ function generarUnIntento({ profesores, dias, bloques, modoReparto, azar }) {
   const avisosHuecosProfesor = compactarHuecosProfesores({
     bloques, bloquesClase, dias, profesores, grupos: gruposReales,
     asignaciones, ocupacionProfesor, ocupacionGrupo, minimoLeccionesPorDia,
+    modo: modoHuecosProfesor,
   })
   const avisos = avisosHuecosProfesor.map(a => ({
     profesorId: a.profesorId,
@@ -557,13 +558,13 @@ function crearAzar(semilla) {
 // deje la menor cantidad de problemas pendientes — tal como se pidió:
 // priorizar la robustez del resultado por sobre la velocidad.
 // ========================================================================
-export function generarHorario({ profesores, dias, bloques, modoReparto = 'parejo', intentos = 40 }) {
+export function generarHorario({ profesores, dias, bloques, modoReparto = 'parejo', modoHuecosProfesor = 'normal', intentos = 40 }) {
   let mejorResultado = null
   let mejorPuntaje = Infinity
 
   for (let i = 0; i < intentos; i++) {
     const azar = crearAzar(i * 2654435761 + 1)
-    const resultado = generarUnIntento({ profesores, dias, bloques, modoReparto, azar })
+    const resultado = generarUnIntento({ profesores, dias, bloques, modoReparto, modoHuecosProfesor, azar })
 
     // Puntaje del intento: cada conflicto "normal" (lección sin ubicar)
     // pesa 1, pero un hueco de grupo sin reparar (incluida una salida
@@ -1057,30 +1058,59 @@ function compactarHuecos({ bloques, bloquesClase, dias, grupos, asignaciones, oc
 // Regla pedida: un profesor no debería tener un bloque de clase libre EN
 // MEDIO de su propia jornada de un día — desde la primera lección que
 // tiene ese día hasta la última, no debería haber huecos (no importa qué
-// grupo sea cada una). A diferencia de la regla de huecos de GRUPO, esta
-// es más blanda: el generador la intenta activamente, pero si no se puede
+// grupo sea cada una). Puede entrar tarde (empezar más allá del bloque 1)
+// o salir temprano (terminar antes del último bloque) sin ningún
+// problema — lo único que se evita es un hueco EN MEDIO de su propio
+// rango ocupado ese día. A diferencia de la regla de huecos de GRUPO,
+// esta es más blanda: el generador la intenta, pero si no se puede
 // resolver sin romper algo más importante (un hueco de grupo, un choque
 // de profesor), se deja así y se informa como AVISO, no como conflicto.
 //
 // Por eso esta fase corre DESPUÉS de `compactarHuecos` (grupos), nunca
 // antes, y cualquier movimiento que proponga para cerrar el hueco de un
 // profesor se descarta si dejaría a algún grupo con un hueco nuevo — la
-// regla de grupo manda siempre. El mecanismo es el mismo principio de
-// "ayuda reversible" ya usado para los huecos entre grupos: cada intento
-// se puede deshacer por completo si no resulta en una mejora real.
+// regla de grupo manda siempre.
+//
+// Dos modos, controlados por `modo` ('normal' | 'estricto'):
+//   - 'normal' (comportamiento histórico, sin cambios): por cada hueco,
+//     se intenta mover UNA lección suelta del mismo profesor (de
+//     cualquier otro momento de ese día) hacia el bloque vacío. Si no
+//     hay ninguna lección suelta que pueda moverse ahí sin romper la
+//     compactación de su grupo, el hueco queda como aviso.
+//   - 'estricto': además de lo anterior, si mover-a-vacío no funciona
+//     (lo más común, porque un grupo ya compacto no suele tener bloques
+//     vacíos disponibles), se intenta en orden:
+//       1) INTERCAMBIO: la lección del profesor con hueco se intercambia
+//          por la lección que YA ocupa ese bloque (de cualquier otro
+//          profesor). Si ese otro profesor queda con un hueco nuevo por
+//          el intercambio, se intenta resolver también en CASCADA
+//          (recursiva, con límite de profundidad) — el mismo principio
+//          de "ayuda reversible" ya usado para huecos de grupo
+//          (pedirAyudaGrupo/deshacer): cada intento de intercambio
+//          devuelve {exito, deshacer}, y si el camino que lo motivó
+//          termina sin resolver el hueco original, se deshace por
+//          completo antes de probar la siguiente opción.
+//       2) MOVER A OTRO DÍA: como último recurso, si ningún intercambio
+//          funciona, se intenta mover la lección aislada del profesor
+//          con hueco a otro día de la semana donde quepa sin generar un
+//          hueco nuevo (ni en su propio horario ni en el grupo al que
+//          pertenece esa lección, y sin chocar con otra clase suya).
+//     Si nada de esto funciona, igual que en modo normal, el hueco queda
+//     como aviso — el modo estricto nunca convierte un aviso en
+//     conflicto duro, solo intenta más caminos antes de rendirse.
 //
 // Las lecciones de actividad cuentan como "ocupado" para el profesor (ver
 // `indicesOcupados` más abajo, que mira `asignaciones` sin filtrar por
 // grupo) — así que un hueco entre una clase y una actividad, o entre dos
 // actividades, también se detecta e intenta cerrar igual que cualquier
 // otro. Lo que nunca ocurre es que una actividad sea elegida como
-// "candidata a mover" (esa lista se restringe a candidatas con grupoId,
-// ver `candidatasDelDia` más abajo), porque mover una actividad le haría
-// perder su propósito de ocupar al profesor en un horario fijo y
-// predecible.
+// "candidata a mover" ni como destino de intercambio/mover-a-otro-día
+// (esa lista se restringe a candidatas con grupoId, ver `candidatasDelDia`
+// más abajo), porque mover una actividad le haría perder su propósito de
+// ocupar al profesor en un horario fijo y predecible.
 // ========================================================================
 
-function compactarHuecosProfesores({ bloques, bloquesClase, dias, profesores, grupos, asignaciones, ocupacionProfesor, ocupacionGrupo, minimoLeccionesPorDia = 0 }) {
+function compactarHuecosProfesores({ bloques, bloquesClase, dias, profesores, grupos, asignaciones, ocupacionProfesor, ocupacionGrupo, minimoLeccionesPorDia = 0, modo = 'normal' }) {
   function kProf(profId, dia, bloqueId) { return `${profId}|${dia}|${bloqueId}` }
   function kGrupo(grupoId, dia, bloqueId) { return `${grupoId}|${dia}|${bloqueId}` }
 
@@ -1110,6 +1140,257 @@ function compactarHuecosProfesores({ bloques, bloquesClase, dias, profesores, gr
       if (hayClaseDespuesEnObjetivo) return false
     }
     return true
+  }
+
+  // Índices (dentro de bloquesClase) del rango ocupado por un profesor un
+  // día dado, y los huecos que tiene en medio de ese rango — se usa tanto
+  // en el bucle principal como al validar si un intercambio resuelve o
+  // empeora el hueco de un profesor distinto.
+  function huecosDelProfesorEseDia(profesorId, dia, asignacionesSimuladas) {
+    const delDia = asignacionesSimuladas.filter(a => a.profesorId === profesorId && a.dia === dia)
+    const indices = delDia
+      .map(a => bloquesClase.findIndex(b => b.id === a.bloqueId))
+      .filter(i => i !== -1)
+      .sort((x, y) => x - y)
+    if (indices.length < 2) return []
+    const primero = indices[0]
+    const ultimo = indices[indices.length - 1]
+    const ocupadosSet = new Set(indices)
+    const huecos = []
+    for (let i = primero; i <= ultimo; i++) {
+      if (!ocupadosSet.has(i)) huecos.push(i)
+    }
+    return huecos
+  }
+
+  // Una candidata "movible" es una lección suelta (no parte de un bloque
+  // doble/continuo) de un profesor cualquiera, con grupo real (nunca una
+  // actividad). Se identifica igual que ya hacía el modo normal.
+  function esUnidadSuelta(asignacion, dia) {
+    const indice = bloquesClase.findIndex(b => b.id === asignacion.bloqueId)
+    return !asignaciones.some(a =>
+      a !== asignacion && a.profesorId === asignacion.profesorId && a.materiaId === asignacion.materiaId &&
+      a.grupoId === asignacion.grupoId && a.dia === dia &&
+      Math.abs(bloquesClase.findIndex(b => b.id === a.bloqueId) - indice) === 1
+    )
+  }
+
+  const PROFUNDIDAD_MAXIMA_CASCADA = 2
+  let intercambiosIntentados = 0
+  const TOPE_INTERCAMBIOS = 3000 // límite de seguridad, igual espíritu que TOPE_AYUDAS en compactarHuecos
+
+  // Verifica que un bloque de destino esté libre para el profesor
+  // `profesorId` ese día (sin chocar con NINGUNA otra clase/actividad
+  // suya), considerando el estado simulado actual de `asignaciones`.
+  function profesorLibreEn(asignacionesSimuladas, profesorId, dia, bloqueId, excluir) {
+    return !asignacionesSimuladas.some(a => a !== excluir && a.profesorId === profesorId && a.dia === dia && a.bloqueId === bloqueId)
+  }
+
+  // Intenta cerrar el hueco de `profesorId` en `dia`/`bloqueHueco`
+  // intercambiando su lección suelta `leccionAMover` (que está en otro
+  // bloque de ese mismo día) con la lección `ocupanteHueco` que hoy ocupa
+  // `bloqueHueco` (de otro profesor). Tras el intercambio:
+  //   - `leccionAMover` pasa a bloqueHueco.id (cierra el hueco original)
+  //   - `ocupanteHueco` pasa al bloque que `leccionAMover` dejó libre
+  // Ambos grupos deben seguir compactos. Si el profesor de `ocupanteHueco`
+  // queda con un hueco NUEVO por este cambio, se intenta resolverlo en
+  // cascada (profundidad acotada) antes de aceptar el intercambio; si esa
+  // sub-resolución falla, se descarta todo el intercambio sin dejar nada
+  // aplicado.
+  function intentarIntercambioConCandidata({ profesorId, dia, bloqueHueco, leccionAMover, ocupanteHueco, profundidadRestante }) {
+    if (profundidadRestante <= 0) return { exito: false }
+    intercambiosIntentados++
+    if (intercambiosIntentados > TOPE_INTERCAMBIOS) return { exito: false }
+
+    const bloqueOrigenLeccion = leccionAMover.bloqueId
+    const bloqueDestinoHueco = bloqueHueco.id
+    const otroProfesor = ocupanteHueco.profesorId
+
+    // El otro profesor debe estar libre en `bloqueOrigenLeccion` ese día
+    // (si no, el intercambio directo ya es imposible sin más movimientos,
+    // y no se intenta nada más complejo que esto en esta fase).
+    if (!profesorLibreEn(asignaciones, otroProfesor, dia, bloqueOrigenLeccion, ocupanteHueco)) return { exito: false }
+    // El grupo de `leccionAMover` no puede ya tener OTRA clase (distinta
+    // de `ocupanteHueco`, que es precisamente la que se va a mover de
+    // ahí) en `bloqueDestinoHueco`. Sin excluir a `ocupanteHueco` acá,
+    // esta condición bloqueaba siempre el caso más común y valioso: un
+    // intercambio DENTRO DEL MISMO GRUPO (ocupanteHueco y leccionAMover
+    // comparten grupoId), porque bloqueDestinoHueco ya está ocupado por
+    // el propio ocupanteHueco que se está reubicando.
+    const hayOtraClaseEnDestino = asignaciones.some(a =>
+      a !== ocupanteHueco && a.grupoId === leccionAMover.grupoId && a.dia === dia && a.bloqueId === bloqueDestinoHueco
+    )
+    if (hayOtraClaseEnDestino) return { exito: false }
+    // Simétricamente, el grupo de `ocupanteHueco` no puede ya tener OTRA
+    // clase (distinta de `leccionAMover`) en `bloqueOrigenLeccion`.
+    const hayOtraClaseEnOrigen = asignaciones.some(a =>
+      a !== leccionAMover && a.grupoId === ocupanteHueco.grupoId && a.dia === dia && a.bloqueId === bloqueOrigenLeccion
+    )
+    if (hayOtraClaseEnOrigen) return { exito: false }
+
+    // Simulamos el intercambio y verificamos que ambos grupos sigan compactos.
+    const grupoA = leccionAMover.grupoId
+    const grupoB = ocupanteHueco.grupoId
+    const asigGrupoA = asignaciones.filter(a => a.grupoId === grupoA && a.dia === dia)
+    const asigGrupoASimuladas = asigGrupoA.map(a => (a === leccionAMover ? { ...a, bloqueId: bloqueDestinoHueco } : a))
+    // OJO: este chequeo parcial (mover solo leccionAMover, dejando
+    // ocupanteHueco en su lugar original) solo tiene sentido cuando son
+    // grupos DISTINTOS. Si grupoA === grupoB, ocupanteHueco pertenece al
+    // mismo array `asigGrupoA` y en este estado parcial quedarían DOS
+    // asignaciones apuntando al mismo bloqueDestinoHueco (inconsistente:
+    // ni siquiera representa un estado real) — ese caso se evalúa más
+    // abajo con la simulación COMBINADA (ambas moviéndose a la vez).
+    if (grupoA !== grupoB && !grupoSigueCompacto(grupoA, dia, asigGrupoASimuladas)) return { exito: false }
+
+    const asigGrupoB = asignaciones.filter(a => a.grupoId === grupoB && a.dia === dia)
+    const asigGrupoBSimuladas = asigGrupoB.map(a => (a === ocupanteHueco ? { ...a, bloqueId: bloqueOrigenLeccion } : a))
+    if (grupoA !== grupoB && !grupoSigueCompacto(grupoB, dia, asigGrupoBSimuladas)) return { exito: false }
+    // Si es el MISMO grupo en ambos lados (un profesor con hueco que
+    // intercambia con otra clase de su propio grupo — caso raro pero
+    // posible), hay que simular el conjunto completo a la vez.
+    if (grupoA === grupoB) {
+      const asigGrupoCombinadas = asigGrupoA.map(a => {
+        if (a === leccionAMover) return { ...a, bloqueId: bloqueDestinoHueco }
+        if (a === ocupanteHueco) return { ...a, bloqueId: bloqueOrigenLeccion }
+        return a
+      })
+      if (!grupoSigueCompacto(grupoA, dia, asigGrupoCombinadas)) return { exito: false }
+    }
+
+
+    // Aplicar el intercambio de forma provisional para poder evaluar si
+    // el otro profesor queda con un hueco nuevo.
+    delete ocupacionProfesor[kProf(profesorId, dia, bloqueOrigenLeccion)]
+    delete ocupacionProfesor[kProf(otroProfesor, dia, bloqueDestinoHueco)]
+    delete ocupacionGrupo[kGrupo(grupoA, dia, bloqueOrigenLeccion)]
+    delete ocupacionGrupo[kGrupo(grupoB, dia, bloqueDestinoHueco)]
+
+    const bloqueOrigenLeccionOriginal = leccionAMover.bloqueId
+    const bloqueDestinoHuecoOriginal = ocupanteHueco.bloqueId
+    leccionAMover.bloqueId = bloqueDestinoHueco
+    ocupanteHueco.bloqueId = bloqueOrigenLeccion
+
+    ocupacionProfesor[kProf(profesorId, dia, bloqueDestinoHueco)] = true
+    ocupacionProfesor[kProf(otroProfesor, dia, bloqueOrigenLeccion)] = true
+    ocupacionGrupo[kGrupo(grupoA, dia, bloqueDestinoHueco)] = true
+    ocupacionGrupo[kGrupo(grupoB, dia, bloqueOrigenLeccion)] = true
+
+    function deshacerEsteIntercambio() {
+      delete ocupacionProfesor[kProf(profesorId, dia, leccionAMover.bloqueId)]
+      delete ocupacionProfesor[kProf(otroProfesor, dia, ocupanteHueco.bloqueId)]
+      delete ocupacionGrupo[kGrupo(grupoA, dia, leccionAMover.bloqueId)]
+      delete ocupacionGrupo[kGrupo(grupoB, dia, ocupanteHueco.bloqueId)]
+      leccionAMover.bloqueId = bloqueOrigenLeccionOriginal
+      ocupanteHueco.bloqueId = bloqueDestinoHuecoOriginal
+      ocupacionProfesor[kProf(profesorId, dia, leccionAMover.bloqueId)] = true
+      ocupacionProfesor[kProf(otroProfesor, dia, ocupanteHueco.bloqueId)] = true
+      ocupacionGrupo[kGrupo(grupoA, dia, leccionAMover.bloqueId)] = true
+      ocupacionGrupo[kGrupo(grupoB, dia, ocupanteHueco.bloqueId)] = true
+    }
+
+    // ¿El otro profesor queda con un hueco NUEVO por este cambio? Si el
+    // hueco que tiene ahora ya existía antes del intercambio (mismo índice
+    // exacto), no es "nuevo" — pero para simplificar y ser conservadores,
+    // alcanza con exigir que, tras el cambio, sus huecos no hayan
+    // aumentado en cantidad respecto a antes.
+    const huecosOtroAntes = huecosDelProfesorEseDia(otroProfesor, dia, asignaciones.map(a =>
+      (a === leccionAMover || a === ocupanteHueco) ? { ...a, bloqueId: a === leccionAMover ? bloqueOrigenLeccionOriginal : bloqueDestinoHuecoOriginal } : a
+    ))
+    const huecosOtroDespues = huecosDelProfesorEseDia(otroProfesor, dia, asignaciones)
+
+    if (huecosOtroDespues.length > huecosOtroAntes.length) {
+      // Empeoró al otro profesor: intentamos resolver SU hueco nuevo en
+      // cascada antes de aceptar. Si no se puede, deshacemos todo.
+      const huecoNuevoIndice = huecosOtroDespues.find(h => !huecosOtroAntes.includes(h))
+      const bloqueHuecoNuevo = bloquesClase[huecoNuevoIndice]
+      const resultadoCascada = intentarCerrarHuecoProfesor({
+        profesorId: otroProfesor, dia, bloqueHueco: bloqueHuecoNuevo, profundidadRestante: profundidadRestante - 1,
+      })
+      if (!resultadoCascada.exito) {
+        deshacerEsteIntercambio()
+        return { exito: false }
+      }
+      // La cascada tuvo éxito y ya aplicó su propio cambio permanente
+      // (con su propia función deshacer). Componemos el deshacer total.
+      return {
+        exito: true,
+        deshacer: () => {
+          resultadoCascada.deshacer()
+          deshacerEsteIntercambio()
+        },
+      }
+    }
+
+    return { exito: true, deshacer: deshacerEsteIntercambio }
+  }
+
+  // Intenta mover la lección suelta `leccionAMover` de un profesor a OTRO
+  // día de la semana (distinto del actual), donde quepa sin generar
+  // huecos nuevos: ni en el propio horario del profesor ese otro día, ni
+  // en el grupo al que pertenece esa lección, y sin chocar con ninguna
+  // otra clase/actividad suya. Último recurso del modo estricto, solo se
+  // intenta si ni mover-a-vacío ni ningún intercambio funcionaron.
+  function intentarMoverAOtroDia({ leccionAMover, diaOriginal }) {
+    const { profesorId, grupoId, bloqueId: bloqueOriginal } = leccionAMover
+    for (const diaCandidato of dias) {
+      if (diaCandidato === diaOriginal) continue
+
+      for (const bloque of bloquesClase) {
+        // El profesor debe estar libre ese bloque, ese día.
+        if (ocupacionProfesor[kProf(profesorId, diaCandidato, bloque.id)]) continue
+        // El grupo no puede ya tener otra clase ahí.
+        if (ocupacionGrupo[kGrupo(grupoId, diaCandidato, bloque.id)]) continue
+
+        // Simular: el grupo, ese nuevo día, debe seguir compacto con la
+        // lección agregada.
+        const asigGrupoDiaCandidato = asignaciones.filter(a => a.grupoId === grupoId && a.dia === diaCandidato)
+        const simuladasConAgregado = [...asigGrupoDiaCandidato, { ...leccionAMover, dia: diaCandidato, bloqueId: bloque.id }]
+        if (!grupoSigueCompacto(grupoId, diaCandidato, simuladasConAgregado)) continue
+
+        // El grupo, en el día ORIGINAL, debe seguir compacto sin esta lección.
+        const asigGrupoDiaOriginal = asignaciones.filter(a => a.grupoId === grupoId && a.dia === diaOriginal && a !== leccionAMover)
+        if (!grupoSigueCompacto(grupoId, diaOriginal, asigGrupoDiaOriginal)) continue
+
+        // El profesor, en el día candidato, no debe quedar con un hueco
+        // nuevo al agregar esta lección ahí.
+        const huecosAntes = huecosDelProfesorEseDia(profesorId, diaCandidato, asignaciones)
+        const asignacionesConMovida = asignaciones.map(a => (a === leccionAMover ? { ...a, dia: diaCandidato, bloqueId: bloque.id } : a))
+        const huecosDespues = huecosDelProfesorEseDia(profesorId, diaCandidato, asignacionesConMovida)
+        if (huecosDespues.length > 0) continue // el destino en sí ya generaría o mantendría un hueco: no sirve
+
+        // Todo válido: aplicar el movimiento de forma permanente.
+        delete ocupacionProfesor[kProf(profesorId, diaOriginal, bloqueOriginal)]
+        delete ocupacionGrupo[kGrupo(grupoId, diaOriginal, bloqueOriginal)]
+        leccionAMover.dia = diaCandidato
+        leccionAMover.bloqueId = bloque.id
+        ocupacionProfesor[kProf(profesorId, diaCandidato, bloque.id)] = true
+        ocupacionGrupo[kGrupo(grupoId, diaCandidato, bloque.id)] = true
+        return true
+      }
+    }
+    return false
+  }
+
+  // Punto de entrada de la cascada: intenta cerrar el hueco puntual
+  // `bloqueHueco` de `profesorId` en `dia`, probando intercambio con cada
+  // candidata posible en ese bloque. Se usa tanto desde el bucle
+  // principal como recursivamente desde `intentarIntercambioConCandidata`.
+  function intentarCerrarHuecoProfesor({ profesorId, dia, bloqueHueco, profundidadRestante }) {
+    const ocupanteHueco = asignaciones.find(a => a.dia === dia && a.bloqueId === bloqueHueco.id && a.grupoId && a.profesorId !== profesorId)
+    if (!ocupanteHueco || !esUnidadSuelta(ocupanteHueco, dia)) return { exito: false }
+
+    // Candidatas del profesor con hueco: sus lecciones sueltas ese mismo
+    // día, en cualquier grupo, que no sean ya el propio bloque del hueco.
+    const candidatas = asignaciones.filter(a =>
+      a.profesorId === profesorId && a.dia === dia && a.bloqueId !== bloqueHueco.id && a.grupoId && esUnidadSuelta(a, dia)
+    )
+    for (const candidata of candidatas) {
+      const resultado = intentarIntercambioConCandidata({
+        profesorId, dia, bloqueHueco, leccionAMover: candidata, ocupanteHueco, profundidadRestante,
+      })
+      if (resultado.exito) return resultado
+    }
+    return { exito: false }
   }
 
   for (const profesor of profesores) {
@@ -1154,32 +1435,17 @@ function compactarHuecosProfesores({ bloques, bloquesClase, dias, profesores, gr
         if (indiceHueco < primerIndiceActual || indiceHueco > ultimoIndiceActual) continue
         if (indicesOcupadosActuales.includes(indiceHueco)) continue
 
-        // Candidatas a mover: cualquier clase del profesor ese mismo día,
-        // en cualquier grupo, que esté FUERA del hueco (no tiene sentido
-        // mover la que ya está justo ahí). Cada candidata es una unidad de
-        // tamaño 1 (lección suelta) — esta fase solo reubica lecciones
-        // individuales, nunca separa un bloque doble o continuo (mover una
-        // sola lección de una unidad de 2+ bloques rompería esa unidad,
-        // lo cual no es válido). Se excluyen las actividades (sin
-        // grupoId): no tiene sentido moverlas, porque no pertenecen a
-        // ningún grupo cuya compactación haya que preservar, y mover una
-        // le haría perder su propósito de marcar al profesor ocupado en
-        // un horario fijo.
+        // Candidatas a mover-a-vacío: cualquier clase del profesor ese
+        // mismo día, en cualquier grupo, que esté FUERA del hueco (no
+        // tiene sentido mover la que ya está justo ahí). Cada candidata
+        // es una unidad de tamaño 1 (lección suelta) — esta fase solo
+        // reubica lecciones individuales, nunca separa un bloque doble o
+        // continuo. Se excluyen las actividades (sin grupoId).
         const candidatasDelDia = asignaciones.filter(a => a.profesorId === profesor.id && a.dia === dia && a.bloqueId !== bloqueHueco.id && a.grupoId)
 
         let resuelto = false
         for (const candidata of candidatasDelDia) {
-          // Esta candidata debe ser una unidad de tamaño 1 (no parte de un
-          // doble/continuo) — se identifica viendo si hay otra asignación
-          // contigua del mismo profesor+materia+grupo en el bloque
-          // inmediatamente anterior o posterior, ese día.
-          const indiceCandidata = bloquesClase.findIndex(b => b.id === candidata.bloqueId)
-          const esParteDeUnidadMayor = asignaciones.some(a =>
-            a !== candidata && a.profesorId === candidata.profesorId && a.materiaId === candidata.materiaId &&
-            a.grupoId === candidata.grupoId && a.dia === dia &&
-            Math.abs(bloquesClase.findIndex(b => b.id === a.bloqueId) - indiceCandidata) === 1
-          )
-          if (esParteDeUnidadMayor) continue
+          if (!esUnidadSuelta(candidata, dia)) continue
 
           // El bloque del hueco debe estar libre para el grupo de la
           // candidata (sin otra materia ya puesta ahí).
@@ -1207,6 +1473,39 @@ function compactarHuecosProfesores({ bloques, bloquesClase, dias, profesores, gr
 
           resuelto = true
           break
+        }
+
+        // MODO ESTRICTO: si mover-a-vacío no resolvió este hueco, se
+        // intenta intercambio (con cascada) y, si tampoco, mover a otro
+        // día — en ese orden, como último recurso.
+        if (!resuelto && modo === 'estricto') {
+          const resultadoIntercambio = intentarCerrarHuecoProfesor({
+            profesorId: profesor.id, dia, bloqueHueco, profundidadRestante: PROFUNDIDAD_MAXIMA_CASCADA,
+          })
+          if (resultadoIntercambio.exito) {
+            resuelto = true
+          }
+        }
+
+        if (!resuelto && modo === 'estricto') {
+          // Último recurso: mover alguna lección suelta del profesor ese
+          // día (cualquiera, no necesariamente adyacente al hueco) a otro
+          // día completo, para que el rango de ese día se acorte y el
+          // hueco deje de estar "en medio". Se intenta con cada candidata
+          // suelta del día, empezando por las más cercanas al hueco.
+          const candidatasParaOtroDia = asignaciones
+            .filter(a => a.profesorId === profesor.id && a.dia === dia && a.grupoId && esUnidadSuelta(a, dia))
+            .sort((a, b) => {
+              const iA = bloquesClase.findIndex(b2 => b2.id === a.bloqueId)
+              const iB = bloquesClase.findIndex(b2 => b2.id === b.bloqueId)
+              return Math.abs(iA - indiceHueco) - Math.abs(iB - indiceHueco)
+            })
+          for (const candidata of candidatasParaOtroDia) {
+            if (intentarMoverAOtroDia({ leccionAMover: candidata, diaOriginal: dia })) {
+              resuelto = true
+              break
+            }
+          }
         }
 
         if (!resuelto) {
